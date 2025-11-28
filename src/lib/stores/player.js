@@ -11,8 +11,8 @@ export const totalDuration = writable(0);
 export const currentFile = writable(null);
 export const loopMode = writable(false);
 
-// Note calculation mode
-export const noteMode = writable("Closest");
+// Note calculation mode (default: Python/YueLyn)
+export const noteMode = writable("Python");
 
 // Key mode (21 or 36 keys)
 export const keyMode = writable("Keys21");

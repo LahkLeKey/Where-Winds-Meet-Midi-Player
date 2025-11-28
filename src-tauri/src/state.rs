@@ -40,7 +40,7 @@ impl AppState {
             is_playing: Arc::new(AtomicBool::new(false)),
             is_paused: Arc::new(AtomicBool::new(false)),
             loop_mode: Arc::new(AtomicBool::new(false)),
-            note_mode: Arc::new(AtomicU8::new(NoteMode::Closest as u8)),
+            note_mode: Arc::new(AtomicU8::new(NoteMode::Python as u8)),
             key_mode: Arc::new(AtomicU8::new(KeyMode::Keys21 as u8)),
             octave_shift: Arc::new(AtomicI8::new(0)),
             current_position: Arc::new(std::sync::Mutex::new(0.0)),

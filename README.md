@@ -47,7 +47,9 @@ This app lets you play music in Where Winds Meet's music minigame! Just add your
 1. **Download the app** - Get the latest release from the releases page
 2. **Extract the files** - Unzip to any folder you like
 3. **Add your MIDI files** - Place your `.mid` files in the `album` folder
-4. **Run the app** - Double-click `wwm-overlay.exe`
+4. **Run as Administrator** - Right-click `wwm-overlay.exe` and select "Run as administrator"
+
+> **Important:** The app requires administrator privileges to send keyboard inputs to the game.
 
 ### Playing Music
 
