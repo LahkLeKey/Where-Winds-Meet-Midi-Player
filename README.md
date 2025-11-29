@@ -43,7 +43,7 @@ If you enjoy this app, consider supporting me on Ko-fi!
 - **Octave shift control** - Adjust pitch up or down by up to 2 octaves
 - **Queue system** - Build your playlist and play songs in order
 - **Favorites** - Mark your favorite songs for quick access, drag to reorder
-- **Search & sort** - Find songs instantly and sort by name, date, or duration
+- **Search & sort** - Find songs instantly and sort by name, duration, BPM, or difficulty
 - **Multiple playlists** - Create, rename, and manage custom playlists
 - **Drag & drop reordering** - Reorder songs in queue, favorites, and playlists
 - **Custom album location** - Choose where to load MIDI files from in Settings
@@ -51,7 +51,10 @@ If you enjoy this app, consider supporting me on Ko-fi!
 - **Seek support** - Click anywhere on the timeline to jump to that position
 - **Global hotkeys** - Control playback from anywhere, even when the game is focused
 - **Mini mode** - Collapse to a small floating icon while playing
-- **Song duration display** - See how long each MIDI file is
+- **Song info display** - See BPM and difficulty (Easy/Medium/Hard/Expert) for each song
+- **Quick favorite** - One-click favorite button for the currently playing song
+- **Remember window position** - App remembers where you placed it
+- **Large library support** - Optimized metadata caching for 10,000+ MIDI files
 
 ## How to Use
 

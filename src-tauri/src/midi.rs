@@ -80,6 +80,90 @@ const HIGH_KEYS: [&str; 7] = ["q", "w", "e", "r", "t", "y", "u"];
 const SCALE_INTERVALS: [i32; 7] = [0, 2, 4, 5, 7, 9, 11];
 const ROOT_NOTE: i32 = 60; // C4
 
+/// MIDI metadata for caching
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MidiMetadata {
+    pub duration: f64,      // seconds
+    pub bpm: u16,           // beats per minute (initial tempo)
+    pub note_count: u32,    // total note-on events
+    pub note_density: f32,  // notes per second
+}
+
+/// Get all MIDI metadata in a single parse (efficient for bulk loading)
+pub fn get_midi_metadata(path: &str) -> Result<MidiMetadata, String> {
+    let data = std::fs::read(path).map_err(|e| e.to_string())?;
+    let smf = Smf::parse(&data).map_err(|e| e.to_string())?;
+
+    let ticks_per_quarter = match smf.header.timing {
+        midly::Timing::Metrical(tpq) => tpq.as_int() as f64,
+        _ => 480.0,
+    };
+
+    let mut tempo_changes: Vec<(u64, f64)> = Vec::new();
+    let mut max_ticks: u64 = 0;
+    let mut note_count: u32 = 0;
+    let mut initial_tempo: f64 = 500_000.0; // Default 120 BPM
+    let mut found_initial_tempo = false;
+
+    // Single pass: collect tempo, duration, and note count
+    for track in &smf.tracks {
+        let mut track_time_ticks: u64 = 0;
+        for event in track {
+            track_time_ticks += event.delta.as_int() as u64;
+
+            match event.kind {
+                TrackEventKind::Meta(midly::MetaMessage::Tempo(t)) => {
+                    let tempo_val = t.as_int() as f64;
+                    if !found_initial_tempo {
+                        initial_tempo = tempo_val;
+                        found_initial_tempo = true;
+                    }
+                    tempo_changes.push((track_time_ticks, tempo_val));
+                }
+                TrackEventKind::Midi { message: MidiMessage::NoteOn { vel, .. }, .. } => {
+                    if vel.as_int() > 0 {
+                        note_count += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if track_time_ticks > max_ticks {
+            max_ticks = track_time_ticks;
+        }
+    }
+    tempo_changes.sort_by_key(|(time, _)| *time);
+
+    // Calculate duration in seconds
+    let mut result_ms = 0.0;
+    let mut last_tick = 0u64;
+    let mut current_tempo = 500_000.0;
+
+    for &(change_tick, new_tempo) in &tempo_changes {
+        if change_tick >= max_ticks {
+            break;
+        }
+        let delta_ticks = change_tick - last_tick;
+        result_ms += delta_ticks as f64 / ticks_per_quarter * current_tempo / 1000.0;
+        last_tick = change_tick;
+        current_tempo = new_tempo;
+    }
+
+    let delta_ticks = max_ticks - last_tick;
+    result_ms += delta_ticks as f64 / ticks_per_quarter * current_tempo / 1000.0;
+
+    let duration = result_ms / 1000.0; // seconds
+    let bpm = (60_000_000.0 / initial_tempo).round() as u16;
+    let note_density = if duration > 0.0 { note_count as f32 / duration as f32 } else { 0.0 };
+
+    Ok(MidiMetadata {
+        duration,
+        bpm,
+        note_count,
+        note_density,
+    })
+}
+
 /// Quick function to get MIDI duration without full processing
 pub fn get_midi_duration(path: &str) -> Result<f64, String> {
     let data = std::fs::read(path).map_err(|e| e.to_string())?;

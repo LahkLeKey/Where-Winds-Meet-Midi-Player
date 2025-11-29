@@ -217,6 +217,11 @@
   // Reactive favorite lookup using a Set for O(1) performance
   $: favoritePaths = new Set($favorites.map(f => f.path));
 
+  // Check if a file is invalid/broken (no duration means parsing failed)
+  function isInvalidFile(file) {
+    return !file.duration || file.duration <= 0;
+  }
+
   $: filteredFiles = $midiFiles
     .filter((file) => file.name.toLowerCase().includes(searchQuery.toLowerCase()))
     .sort((a, b) => {
@@ -229,6 +234,14 @@
           return (a.duration || 0) - (b.duration || 0);
         case "duration-desc":
           return (b.duration || 0) - (a.duration || 0);
+        case "bpm-asc":
+          return (a.bpm || 120) - (b.bpm || 120);
+        case "bpm-desc":
+          return (b.bpm || 120) - (a.bpm || 120);
+        case "density-asc":
+          return (a.note_density || 0) - (b.note_density || 0);
+        case "density-desc":
+          return (b.note_density || 0) - (a.note_density || 0);
         default:
           return 0;
       }
@@ -239,6 +252,10 @@
     { id: "name-desc", label: "Z-A", icon: "mdi:sort-alphabetical-descending" },
     { id: "duration-asc", label: "Shortest", icon: "mdi:sort-numeric-ascending" },
     { id: "duration-desc", label: "Longest", icon: "mdi:sort-numeric-descending" },
+    { id: "bpm-asc", label: "Slow", icon: "mdi:speedometer-slow" },
+    { id: "bpm-desc", label: "Fast", icon: "mdi:speedometer" },
+    { id: "density-asc", label: "Easy", icon: "mdi:music-note" },
+    { id: "density-desc", label: "Dense", icon: "mdi:music-note-plus" },
   ];
 
 </script>
@@ -358,12 +375,14 @@
     class="flex-1 overflow-y-auto space-y-1 pr-2 {showTopMask && showBottomMask ? 'scroll-mask-both' : showTopMask ? 'scroll-mask-top' : showBottomMask ? 'scroll-mask-bottom' : ''}"
   >
     {#each filteredFiles as file, index (file.path)}
+      {@const invalid = isInvalidFile(file)}
       <div
         class="group spotify-list-item flex items-center gap-4 py-2 transition-all duration-200 {$currentFile ===
         file.path
           ? 'bg-white/10 ring-1 ring-white/5'
-          : 'hover:bg-white/5'}"
+          : 'hover:bg-white/5'} {invalid ? 'opacity-60' : ''}"
         in:fly={{ y: 10, duration: 200, delay: Math.min(index * 20, 200) }}
+        title={invalid ? 'Invalid MIDI file - cannot parse' : ''}
       >
         <!-- Number / Play Button / Playing Indicator -->
         <div class="w-8 flex items-center justify-center flex-shrink-0">
@@ -389,80 +408,92 @@
                 ? 'text-[#1db954] font-semibold'
                 : ''} group-hover:hidden">{index + 1}</span
             >
-            <button
-              class="hidden group-hover:flex items-center justify-center w-7 h-7 rounded-full bg-[#1db954] hover:scale-110 transition-transform shadow-lg"
-              onclick={() => handlePlay(file)}
-              title="Play"
-            >
-              <Icon icon="mdi:play" class="w-4 h-4 text-black" />
-            </button>
+            {#if !invalid}
+              <button
+                class="hidden group-hover:flex items-center justify-center w-7 h-7 rounded-full bg-[#1db954] hover:scale-110 transition-transform shadow-lg"
+                onclick={() => handlePlay(file)}
+                title="Play"
+              >
+                <Icon icon="mdi:play" class="w-4 h-4 text-black" />
+              </button>
+            {/if}
           {/if}
         </div>
 
         <!-- Song Info -->
         <div
-          class="flex-1 min-w-0"
-          role="button"
-          tabindex="0"
-          onclick={() => handlePlay(file)}
+          class="flex-1 min-w-0 {invalid ? 'cursor-not-allowed' : ''}"
+          role={invalid ? undefined : "button"}
+          tabindex={invalid ? undefined : 0}
+          onclick={() => !invalid && handlePlay(file)}
           onkeydown={(event) => {
-            if (event.key === "Enter" || event.key === " ") {
+            if (!invalid && (event.key === "Enter" || event.key === " ")) {
               event.preventDefault();
               handlePlay(file);
             }
           }}
         >
           <p
-            class="text-sm font-medium text-white truncate transition-colors {$currentFile ===
-            file.path
-              ? 'text-[#1db954]'
-              : 'group-hover:text-white'}"
+            class="text-sm font-medium truncate transition-colors {invalid
+              ? 'text-red-400'
+              : $currentFile === file.path
+                ? 'text-[#1db954]'
+                : 'text-white group-hover:text-white'}"
           >
             {file.name}
           </p>
-          <p class="text-xs text-white/40">MIDI Track</p>
+          <p class="text-xs {invalid ? 'text-red-400/60' : 'text-white/40'}">
+            {#if invalid}
+              Invalid file
+            {:else}
+              {file.bpm || 120} BPM • {#if (file.note_density || 0) < 3}Easy{:else if (file.note_density || 0) < 6}Medium{:else if (file.note_density || 0) < 10}Hard{:else}Expert{/if}
+            {/if}
+          </p>
         </div>
 
         <!-- Duration -->
-        <div class="text-sm text-white/40 flex-shrink-0 tabular-nums">
-          {file.duration
-            ? `${Math.floor(file.duration / 60)}:${String(Math.floor(file.duration % 60)).padStart(2, "0")}`
-            : "--:--"}
+        <div class="text-sm flex-shrink-0 tabular-nums flex items-center gap-1 {invalid ? 'text-red-400' : 'text-white/40'}">
+          {#if invalid}
+            <Icon icon="mdi:alert-circle" class="w-4 h-4" />
+          {:else}
+            {`${Math.floor(file.duration / 60)}:${String(Math.floor(file.duration % 60)).padStart(2, "0")}`}
+          {/if}
         </div>
 
         <!-- Action Buttons -->
         <div class="flex items-center gap-1 flex-shrink-0">
-          <!-- Favorite Button -->
-          <button
-            class="p-1.5 rounded-full transition-all {favoritePaths.has(file.path)
-              ? 'text-[#1db954]'
-              : 'text-white/30 opacity-0 group-hover:opacity-100 hover:text-white'}"
-            onclick={(e) => {
-              e.stopPropagation();
-              handleToggleFavorite(file);
-            }}
-            title={favoritePaths.has(file.path)
-              ? "Remove from favorites"
-              : "Add to favorites"}
-          >
-            <Icon
-              icon={favoritePaths.has(file.path) ? "mdi:heart" : "mdi:heart-outline"}
-              class="w-5 h-5"
-            />
-          </button>
-
-          <!-- Add to Playlist Menu -->
-          <div class="relative">
+          {#if !invalid}
+            <!-- Favorite Button -->
             <button
-              class="p-1.5 rounded-full text-white/30 opacity-0 group-hover:opacity-100 hover:text-white transition-all"
+              class="p-1.5 rounded-full transition-all {favoritePaths.has(file.path)
+                ? 'text-[#1db954]'
+                : 'text-white/30 opacity-0 group-hover:opacity-100 hover:text-white'}"
               onclick={(e) => {
                 e.stopPropagation();
-                showPlaylistMenu = showPlaylistMenu === file.path ? null : file.path;
+                handleToggleFavorite(file);
               }}
-              title="Add to playlist"
+              title={favoritePaths.has(file.path)
+                ? "Remove from favorites"
+                : "Add to favorites"}
             >
-              <Icon icon="mdi:playlist-plus" class="w-5 h-5" />
+              <Icon
+                icon={favoritePaths.has(file.path) ? "mdi:heart" : "mdi:heart-outline"}
+                class="w-5 h-5"
+              />
             </button>
+
+            <!-- Add to Playlist Menu -->
+            <div class="relative">
+              <button
+                class="p-1.5 rounded-full text-white/30 opacity-0 group-hover:opacity-100 hover:text-white transition-all"
+                onclick={(e) => {
+                  e.stopPropagation();
+                  showPlaylistMenu = showPlaylistMenu === file.path ? null : file.path;
+                }}
+                title="Add to playlist"
+              >
+                <Icon icon="mdi:playlist-plus" class="w-5 h-5" />
+              </button>
 
             {#if showPlaylistMenu === file.path}
               <div
@@ -499,6 +530,7 @@
               </div>
             {/if}
           </div>
+          {/if}
         </div>
       </div>
     {/each}

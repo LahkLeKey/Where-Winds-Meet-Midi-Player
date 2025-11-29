@@ -10,6 +10,7 @@ export const currentPosition = writable(0);
 export const totalDuration = writable(0);
 export const currentFile = writable(null);
 export const loopMode = writable(false);
+export const shuffleMode = writable(false);
 
 // Note calculation mode (default: Python/YueLyn)
 export const noteMode = writable("Python");
@@ -435,6 +436,13 @@ export async function playMidi(path) {
     isPaused.set(false);
     currentFile.set(path);
 
+    // Update currentIndex to match the playing file's position in playlist
+    const $playlist = get(playlist);
+    const playingIndex = $playlist.findIndex(f => f.path === path);
+    if (playingIndex !== -1) {
+      currentIndex.set(playingIndex);
+    }
+
     // Track stats
     const filename = path.split(/[\\/]/).pop() || path;
     trackSongPlay(filename);
@@ -485,6 +493,11 @@ export async function toggleLoop() {
   } catch (error) {
     console.error('Failed to set loop mode:', error);
   }
+}
+
+// Toggle shuffle mode
+export function toggleShuffle() {
+  shuffleMode.update(v => !v);
 }
 
 // Seek to a specific position (in seconds)
@@ -587,12 +600,27 @@ export async function testAllKeys36() {
 // Play next in playlist
 export async function playNext() {
   const $playlist = get(playlist);
-  const $currentIndex = get(currentIndex);
+  const $currentFile = get(currentFile);
+  const $shuffleMode = get(shuffleMode);
 
   if ($playlist.length === 0) return;
 
-  const nextIndex = ($currentIndex + 1) % $playlist.length;
-  currentIndex.set(nextIndex);
+  // Find current index based on playing file (more reliable than stored index)
+  let $currentIndex = $playlist.findIndex(f => f.path === $currentFile);
+  if ($currentIndex === -1) $currentIndex = get(currentIndex);
+
+  // Clamp to valid range
+  $currentIndex = Math.max(0, Math.min($currentIndex, $playlist.length - 1));
+
+  let nextIndex;
+  if ($shuffleMode && $playlist.length > 1) {
+    // Pick a random index different from current
+    do {
+      nextIndex = Math.floor(Math.random() * $playlist.length);
+    } while (nextIndex === $currentIndex);
+  } else {
+    nextIndex = ($currentIndex + 1) % $playlist.length;
+  }
 
   // Reset position immediately before starting new track
   currentPosition.set(0);
@@ -604,12 +632,18 @@ export async function playNext() {
 // Play previous in playlist
 export async function playPrevious() {
   const $playlist = get(playlist);
-  const $currentIndex = get(currentIndex);
+  const $currentFile = get(currentFile);
 
   if ($playlist.length === 0) return;
 
+  // Find current index based on playing file (more reliable than stored index)
+  let $currentIndex = $playlist.findIndex(f => f.path === $currentFile);
+  if ($currentIndex === -1) $currentIndex = get(currentIndex);
+
+  // Clamp to valid range
+  $currentIndex = Math.max(0, Math.min($currentIndex, $playlist.length - 1));
+
   const prevIndex = ($currentIndex - 1 + $playlist.length) % $playlist.length;
-  currentIndex.set(prevIndex);
 
   // Reset position immediately before starting new track
   currentPosition.set(0);

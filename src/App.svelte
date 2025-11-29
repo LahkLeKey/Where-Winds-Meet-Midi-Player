@@ -3,6 +3,8 @@
   import { listen } from "@tauri-apps/api/event";
   import { invoke } from "@tauri-apps/api/core";
   import { onDestroy } from "svelte";
+  import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
 
   // Current version
   const APP_VERSION = "1.0.7";
@@ -70,8 +72,49 @@
   checkInterval = setInterval(checkGameWindow, 2000);
   checkGameWindow(); // Initial check
 
+  // Window position saving
+  let savePositionInterval;
+  let lastSavedPosition = null;
+
+  async function saveWindowPosition() {
+    try {
+      const appWindow = getCurrentWindow();
+      const pos = await appWindow.outerPosition();
+      const size = await appWindow.outerSize();
+
+      // Only save if position changed
+      const newPos = `${pos.x},${pos.y},${size.width},${size.height}`;
+      if (newPos !== lastSavedPosition) {
+        lastSavedPosition = newPos;
+        await invoke('save_window_position', {
+          x: pos.x,
+          y: pos.y,
+          width: size.width,
+          height: size.height
+        });
+      }
+    } catch (e) {
+      console.error('Failed to save window position:', e);
+    }
+  }
+
+  async function loadWindowPosition() {
+    try {
+      const saved = await invoke('get_window_position');
+      if (saved) {
+        const appWindow = getCurrentWindow();
+        await appWindow.setPosition(new PhysicalPosition(saved.x, saved.y));
+        await appWindow.setSize(new PhysicalSize(saved.width, saved.height));
+      }
+    } catch (e) {
+      console.error('Failed to load window position:', e);
+    }
+  }
+
   onDestroy(() => {
     if (checkInterval) clearInterval(checkInterval);
+    if (savePositionInterval) clearInterval(savePositionInterval);
+    saveWindowPosition(); // Save on destroy
   });
   import { fade, fly } from "svelte/transition";
   import Icon from "@iconify/svelte";
@@ -98,6 +141,8 @@
     currentFile,
     playlist,
     favorites,
+    toggleFavorite,
+    midiFiles,
     savedPlaylists,
     smartPause,
     loopMode,
@@ -201,10 +246,24 @@
     { action: "Mode", key: "[ / ]" },
   ];
 
+  // Check if current song is favorited
+  $: currentFileIsFavorite = $currentFile && $favorites.some(f => f.path === $currentFile);
+  $: currentFileData = $currentFile ? $midiFiles.find(f => f.path === $currentFile) : null;
+
+  function toggleCurrentFavorite() {
+    if (currentFileData) {
+      toggleFavorite(currentFileData);
+    }
+  }
+
   onMount(async () => {
+    await loadWindowPosition(); // Restore window position
     await loadMidiFiles();
     initializeListeners();
     checkForUpdates(); // Check for updates on startup
+
+    // Save window position every 5 seconds (only if changed)
+    savePositionInterval = setInterval(saveWindowPosition, 5000);
 
     // Listen for global shortcut events from Rust backend
     const unlisten = await listen("global-shortcut", async (event) => {
@@ -550,7 +609,7 @@
               <!-- Game Status Dot -->
               <div class="absolute -top-1 -right-1 w-3 h-3 rounded-full border-2 border-[#121212] {gameFound ? 'bg-[#1db954]' : 'bg-red-500'} {gameFound && $isPlaying ? 'animate-pulse' : ''}"></div>
             </div>
-            <div class="min-w-0">
+            <div class="min-w-0 flex-1">
               <p class="text-sm font-semibold truncate text-white/90">
                 {filename($currentFile)}
               </p>
@@ -562,6 +621,15 @@
                 {/if}
               </p>
             </div>
+            {#if $currentFile}
+              <button
+                class="p-1.5 rounded-full transition-all flex-shrink-0 {currentFileIsFavorite ? 'text-[#1db954]' : 'text-white/30 hover:text-white'}"
+                onclick={toggleCurrentFavorite}
+                title={currentFileIsFavorite ? "Remove from favorites" : "Add to favorites"}
+              >
+                <Icon icon={currentFileIsFavorite ? "mdi:heart" : "mdi:heart-outline"} class="w-5 h-5" />
+              </button>
+            {/if}
           </div>
 
           <!-- Player Controls Center -->
@@ -675,15 +743,6 @@
 
           <!-- Right Controls -->
           <div class="flex items-center gap-2 w-48 justify-end">
-            <button
-              class="spotify-icon-button transition-all duration-200 {$loopMode
-                ? 'text-[#1db954] bg-[#1db954]/10'
-                : 'hover:text-white'}"
-              onclick={toggleLoop}
-              title={$loopMode ? "Loop enabled" : "Enable loop"}
-            >
-              <Icon icon="mdi:repeat" class="w-4 h-4" />
-            </button>
             <button
               class="spotify-icon-button"
               onclick={() => (activeView = "queue")}

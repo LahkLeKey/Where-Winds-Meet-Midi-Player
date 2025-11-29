@@ -27,36 +27,47 @@ fn get_config_path() -> Result<std::path::PathBuf, String> {
     Ok(exe_dir.join("config.json"))
 }
 
-fn load_saved_album_path() {
+fn load_config() -> serde_json::Value {
     if let Ok(config_path) = get_config_path() {
         if config_path.exists() {
             if let Ok(content) = std::fs::read_to_string(&config_path) {
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) {
-                    if let Some(path) = json["album_path"].as_str() {
-                        let path_buf = std::path::PathBuf::from(path);
-                        if path_buf.exists() {
-                            if let Ok(mut guard) = ALBUM_PATH.write() {
-                                *guard = Some(path.to_string());
-                                println!("Loaded album path: {}", path);
-                            }
-                        }
-                    }
+                if let Ok(json) = serde_json::from_str(&content) {
+                    return json;
                 }
+            }
+        }
+    }
+    serde_json::json!({})
+}
+
+fn save_config(config: &serde_json::Value) {
+    if let Ok(config_path) = get_config_path() {
+        if let Ok(content) = serde_json::to_string_pretty(config) {
+            let _ = std::fs::write(&config_path, content);
+        }
+    }
+}
+
+fn load_saved_album_path() {
+    let config = load_config();
+    if let Some(path) = config["album_path"].as_str() {
+        let path_buf = std::path::PathBuf::from(path);
+        if path_buf.exists() {
+            if let Ok(mut guard) = ALBUM_PATH.write() {
+                *guard = Some(path.to_string());
+                println!("Loaded album path: {}", path);
             }
         }
     }
 }
 
 fn save_album_path(path: Option<&str>) {
-    if let Ok(config_path) = get_config_path() {
-        let json = match path {
-            Some(p) => serde_json::json!({ "album_path": p }),
-            None => serde_json::json!({}),
-        };
-        if let Ok(content) = serde_json::to_string_pretty(&json) {
-            let _ = std::fs::write(&config_path, content);
-        }
+    let mut config = load_config();
+    match path {
+        Some(p) => config["album_path"] = serde_json::json!(p),
+        None => { config.as_object_mut().map(|o| o.remove("album_path")); }
     }
+    save_config(&config);
 }
 
 fn get_album_folder() -> Result<std::path::PathBuf, String> {
@@ -85,6 +96,62 @@ struct MidiFile {
     name: String,
     path: String,
     duration: f64,
+    bpm: u16,
+    note_density: f32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MetadataCache {
+    version: u8,
+    files: std::collections::HashMap<String, CachedMetadata>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct CachedMetadata {
+    mtime: u64,  // file modification time
+    duration: f64,
+    bpm: u16,
+    note_density: f32,
+}
+
+fn get_metadata_cache_path() -> Result<std::path::PathBuf, String> {
+    let album_path = get_album_folder()?;
+    Ok(album_path.join(".metadata_cache.json"))
+}
+
+fn load_metadata_cache() -> MetadataCache {
+    if let Ok(cache_path) = get_metadata_cache_path() {
+        if cache_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&cache_path) {
+                if let Ok(cache) = serde_json::from_str::<MetadataCache>(&content) {
+                    if cache.version == 1 {
+                        return cache;
+                    }
+                }
+            }
+        }
+    }
+    MetadataCache {
+        version: 1,
+        files: std::collections::HashMap::new(),
+    }
+}
+
+fn save_metadata_cache(cache: &MetadataCache) {
+    if let Ok(cache_path) = get_metadata_cache_path() {
+        if let Ok(content) = serde_json::to_string(cache) {
+            let _ = std::fs::write(&cache_path, content);
+        }
+    }
+}
+
+fn get_file_mtime(path: &std::path::Path) -> u64 {
+    path.metadata()
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 // Hotkey IDs
@@ -94,37 +161,77 @@ const HOTKEY_STOP_F12: i32 = 3;
 const HOTKEY_PREV_F10: i32 = 4;
 const HOTKEY_NEXT_F11: i32 = 5;
 
-// Load MIDI files from album folder
+// Load MIDI files from album folder with metadata caching
 #[tauri::command]
 async fn load_midi_files() -> Result<Vec<MidiFile>, String> {
     let album_path = get_album_folder()?;
-
     let mut files = Vec::new();
 
-    if album_path.exists() {
-        let entries = std::fs::read_dir(&album_path).map_err(|e| e.to_string())?;
+    if !album_path.exists() {
+        return Ok(files);
+    }
 
-        for entry in entries {
-            if let Ok(entry) = entry {
-                let path = entry.path();
-                if path.extension().and_then(|s| s.to_str()) == Some("mid") {
-                    let name = path.file_stem()
-                        .and_then(|s| s.to_str())
-                        .unwrap_or("Unknown")
-                        .to_string();
+    // Load existing cache
+    let mut cache = load_metadata_cache();
+    let mut cache_modified = false;
 
-                    // Get actual duration from MIDI file
-                    let duration = midi::get_midi_duration(&path.to_string_lossy())
-                        .unwrap_or(0.0);
+    let entries = std::fs::read_dir(&album_path).map_err(|e| e.to_string())?;
 
-                    files.push(MidiFile {
-                        name,
-                        path: path.to_string_lossy().to_string(),
-                        duration,
-                    });
-                }
+    for entry in entries {
+        if let Ok(entry) = entry {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("mid") {
+                continue;
             }
+
+            let path_str = path.to_string_lossy().to_string();
+            let name = path.file_stem()
+                .and_then(|s| s.to_str())
+                .unwrap_or("Unknown")
+                .to_string();
+            let mtime = get_file_mtime(&path);
+
+            // Check cache
+            let metadata = if let Some(cached) = cache.files.get(&path_str) {
+                if cached.mtime == mtime {
+                    // Cache hit
+                    (cached.duration, cached.bpm, cached.note_density)
+                } else {
+                    // File modified, re-parse
+                    let meta = midi::get_midi_metadata(&path_str).unwrap_or(midi::MidiMetadata {
+                        duration: 0.0, bpm: 120, note_count: 0, note_density: 0.0
+                    });
+                    cache.files.insert(path_str.clone(), CachedMetadata {
+                        mtime, duration: meta.duration, bpm: meta.bpm, note_density: meta.note_density
+                    });
+                    cache_modified = true;
+                    (meta.duration, meta.bpm, meta.note_density)
+                }
+            } else {
+                // Not in cache, parse
+                let meta = midi::get_midi_metadata(&path_str).unwrap_or(midi::MidiMetadata {
+                    duration: 0.0, bpm: 120, note_count: 0, note_density: 0.0
+                });
+                cache.files.insert(path_str.clone(), CachedMetadata {
+                    mtime, duration: meta.duration, bpm: meta.bpm, note_density: meta.note_density
+                });
+                cache_modified = true;
+                (meta.duration, meta.bpm, meta.note_density)
+            };
+
+            files.push(MidiFile {
+                name,
+                path: path_str,
+                duration: metadata.0,
+                bpm: metadata.1,
+                note_density: metadata.2,
+            });
         }
+    }
+
+    // Save cache if modified
+    if cache_modified {
+        save_metadata_cache(&cache);
     }
 
     Ok(files)
@@ -531,19 +638,23 @@ async fn import_midi_file(source_path: String) -> Result<MidiFile, String> {
     // Copy file to album folder
     std::fs::copy(&source, &dest_path).map_err(|e| format!("Failed to copy file: {}", e))?;
 
-    // Get duration and return file info
+    // Get metadata and return file info
     let name = source.file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("Unknown")
         .to_string();
 
-    let duration = midi::get_midi_duration(&dest_path.to_string_lossy())
-        .unwrap_or(0.0);
+    let meta = midi::get_midi_metadata(&dest_path.to_string_lossy())
+        .unwrap_or(midi::MidiMetadata {
+            duration: 0.0, bpm: 120, note_count: 0, note_density: 0.0
+        });
 
     Ok(MidiFile {
         name,
         path: dest_path.to_string_lossy().to_string(),
-        duration,
+        duration: meta.duration,
+        bpm: meta.bpm,
+        note_density: meta.note_density,
     })
 }
 
@@ -580,6 +691,48 @@ async fn reset_album_path() -> Result<String, String> {
     let exe_path = std::env::current_exe().map_err(|e| e.to_string())?;
     let exe_dir = exe_path.parent().ok_or("Failed to get executable directory")?;
     Ok(exe_dir.join("album").to_string_lossy().to_string())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct WindowPosition {
+    x: i32,
+    y: i32,
+    width: u32,
+    height: u32,
+}
+
+#[tauri::command]
+async fn get_window_position() -> Result<Option<WindowPosition>, String> {
+    let config = load_config();
+    if let Some(pos) = config.get("window_position") {
+        if let (Some(x), Some(y), Some(w), Some(h)) = (
+            pos["x"].as_i64(),
+            pos["y"].as_i64(),
+            pos["width"].as_u64(),
+            pos["height"].as_u64(),
+        ) {
+            return Ok(Some(WindowPosition {
+                x: x as i32,
+                y: y as i32,
+                width: w as u32,
+                height: h as u32,
+            }));
+        }
+    }
+    Ok(None)
+}
+
+#[tauri::command]
+async fn save_window_position(x: i32, y: i32, width: u32, height: u32) -> Result<(), String> {
+    let mut config = load_config();
+    config["window_position"] = serde_json::json!({
+        "x": x,
+        "y": y,
+        "width": width,
+        "height": height
+    });
+    save_config(&config);
+    Ok(())
 }
 
 #[tauri::command]
@@ -672,19 +825,23 @@ async fn download_midi_from_url(url: String) -> Result<MidiFile, String> {
     std::fs::write(&final_path, &bytes)
         .map_err(|e| format!("Failed to save file: {}", e))?;
 
-    // Get duration and return file info
+    // Get metadata and return file info
     let name = final_path.file_stem()
         .and_then(|s| s.to_str())
         .unwrap_or("Unknown")
         .to_string();
 
-    let duration = midi::get_midi_duration(&final_path.to_string_lossy())
-        .unwrap_or(0.0);
+    let meta = midi::get_midi_metadata(&final_path.to_string_lossy())
+        .unwrap_or(midi::MidiMetadata {
+            duration: 0.0, bpm: 120, note_count: 0, note_density: 0.0
+        });
 
     Ok(MidiFile {
         name,
         path: final_path.to_string_lossy().to_string(),
-        duration,
+        duration: meta.duration,
+        bpm: meta.bpm,
+        note_density: meta.note_density,
     })
 }
 
@@ -1090,6 +1247,8 @@ fn main() {
             get_album_path,
             set_album_path,
             reset_album_path,
+            get_window_position,
+            save_window_position,
             check_for_update,
             download_update,
             install_update,
