@@ -37,10 +37,11 @@
   let spamDelay = 20;
   let chordSize = 3;
   let cloudMode = false;
+  let qwertzMode = false;
   let albumPath = "";
   let isChangingPath = false;
 
-  const APP_VERSION = "1.0.7";
+  import { APP_VERSION } from "../version.js";
   let updateAvailable = null;
 
   const isDev = import.meta.env.DEV;
@@ -59,6 +60,13 @@
       cloudMode = await invoke('get_cloud_mode');
     } catch (e) {
       console.error("Failed to get cloud mode:", e);
+    }
+
+    // Load QWERTZ mode
+    try {
+      qwertzMode = await invoke('get_qwertz_mode');
+    } catch (e) {
+      console.error("Failed to get qwertz mode:", e);
     }
 
     // Load album path
@@ -108,6 +116,16 @@
     } catch (e) {
       console.error("Failed to set cloud mode:", e);
       cloudMode = !cloudMode; // revert on error
+    }
+  }
+
+  async function toggleQwertzMode() {
+    qwertzMode = !qwertzMode;
+    try {
+      await invoke('set_qwertz_mode', { enabled: qwertzMode });
+    } catch (e) {
+      console.error("Failed to set qwertz mode:", e);
+      qwertzMode = !qwertzMode;
     }
   }
 
@@ -501,6 +519,26 @@
       <div class="flex items-center gap-2 mb-4">
         <Icon icon="mdi:keyboard" class="w-5 h-5 text-[#1db954]" />
         <h3 class="text-lg font-semibold">Keyboard Layout</h3>
+      </div>
+
+      <!-- QWERTZ Toggle -->
+      <div class="flex items-center justify-between py-3 mb-4">
+        <div>
+          <p class="font-medium text-white">QWERTZ Keyboard</p>
+          <p class="text-sm text-white/60">For German/Austrian keyboards (swaps Y↔Z)</p>
+        </div>
+        <button
+          class="relative w-12 h-6 rounded-full transition-colors duration-200 {qwertzMode
+            ? 'bg-[#1db954]'
+            : 'bg-white/20'}"
+          onclick={toggleQwertzMode}
+        >
+          <div
+            class="absolute top-1 w-4 h-4 rounded-full bg-white shadow transition-transform duration-200 {qwertzMode
+              ? 'translate-x-7'
+              : 'translate-x-1'}"
+          ></div>
+        </button>
       </div>
 
       <div class="space-y-3 text-sm">

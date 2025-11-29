@@ -7,7 +7,7 @@
   import { PhysicalPosition, PhysicalSize } from "@tauri-apps/api/dpi";
 
   // Current version
-  const APP_VERSION = "1.0.8";
+  import { APP_VERSION } from "./lib/version.js";
 
   // Game window detection
   let gameFound = false;

@@ -11,6 +11,9 @@ static MODIFIER_DELAY_MS: AtomicU64 = AtomicU64::new(2);
 // Input mode: false = PostMessage (default), true = SendInput (for cloud gaming)
 static USE_SEND_INPUT: AtomicBool = AtomicBool::new(false);
 
+// Keyboard layout: false = QWERTY (default), true = QWERTZ (Y/Z swapped)
+static USE_QWERTZ: AtomicBool = AtomicBool::new(false);
+
 /// Set input mode: true = SendInput (cloud gaming), false = PostMessage (local)
 pub fn set_send_input_mode(enabled: bool) {
     USE_SEND_INPUT.store(enabled, Ordering::SeqCst);
@@ -20,6 +23,17 @@ pub fn set_send_input_mode(enabled: bool) {
 /// Get current input mode
 pub fn get_send_input_mode() -> bool {
     USE_SEND_INPUT.load(Ordering::SeqCst)
+}
+
+/// Set keyboard layout: true = QWERTZ, false = QWERTY
+pub fn set_qwertz_mode(enabled: bool) {
+    USE_QWERTZ.store(enabled, Ordering::SeqCst);
+    println!("[KEYBOARD] Layout: {}", if enabled { "QWERTZ" } else { "QWERTY" });
+}
+
+/// Get current keyboard layout
+pub fn get_qwertz_mode() -> bool {
+    USE_QWERTZ.load(Ordering::SeqCst)
 }
 
 // Cached window handle and last check time
@@ -204,9 +218,12 @@ fn parse_key(key: &str) -> Option<(u32, Modifier)> {
 /// Convert key string to virtual key code
 #[cfg(target_os = "windows")]
 fn key_to_vk(key: &str) -> Option<u32> {
+    let qwertz = USE_QWERTZ.load(Ordering::SeqCst);
+
     match key {
         // Low octave: Z X C V B N M
-        "z" => Some(0x5A),
+        // QWERTZ: Z and Y are swapped
+        "z" => Some(if qwertz { 0x59 } else { 0x5A }), // Y key on QWERTZ
         "x" => Some(0x58),
         "c" => Some(0x43),
         "v" => Some(0x56),
@@ -224,12 +241,13 @@ fn key_to_vk(key: &str) -> Option<u32> {
         "j" => Some(0x4A),
 
         // High octave: Q W E R T Y U
+        // QWERTZ: Z and Y are swapped
         "q" => Some(0x51),
         "w" => Some(0x57),
         "e" => Some(0x45),
         "r" => Some(0x52),
         "t" => Some(0x54),
-        "y" => Some(0x59),
+        "y" => Some(if qwertz { 0x5A } else { 0x59 }), // Z key on QWERTZ
         "u" => Some(0x55),
 
         _ => None,

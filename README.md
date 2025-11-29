@@ -57,6 +57,7 @@ If you enjoy this app, consider supporting me on Ko-fi!
 - **Remember window position** - App remembers where you placed it
 - **Large library support** - Optimized metadata caching for 10,000+ MIDI files
 - **Band Mode** - Play together with friends (⚠️ experimental)
+- **QWERTZ keyboard support** - Toggle in Settings for German/Austrian keyboards
 
 ## How to Use
 

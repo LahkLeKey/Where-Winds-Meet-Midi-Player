@@ -443,6 +443,17 @@ async fn get_cloud_mode() -> Result<bool, String> {
 }
 
 #[tauri::command]
+async fn set_qwertz_mode(enabled: bool) -> Result<(), String> {
+    keyboard::set_qwertz_mode(enabled);
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_qwertz_mode() -> Result<bool, String> {
+    Ok(keyboard::get_qwertz_mode())
+}
+
+#[tauri::command]
 async fn test_all_keys() -> Result<(), String> {
     // Test all 21 keys: Low (Z-M), Mid (A-J), High (Q-U)
     let keys = ["z", "x", "c", "v", "b", "n", "m", "a", "s", "d", "f", "g", "h", "j", "q", "w", "e", "r", "t", "y", "u"];
@@ -1326,6 +1337,8 @@ fn main() {
             get_modifier_delay,
             set_cloud_mode,
             get_cloud_mode,
+            set_qwertz_mode,
+            get_qwertz_mode,
             is_game_focused,
             is_game_window_found,
             test_all_keys,
