@@ -102,6 +102,12 @@ fn save_custom_window_keywords(keywords: &[String]) {
     save_config(&config);
 }
 
+fn get_data_path(filename: &str) -> Result<std::path::PathBuf, String> {
+    let exe_path = std::env::current_exe().map_err(|e| e.to_string())?;
+    let exe_dir = exe_path.parent().ok_or("Failed to get executable directory")?;
+    Ok(exe_dir.join(filename))
+}
+
 fn get_album_folder() -> Result<std::path::PathBuf, String> {
     // Check if custom path is set - return it even if it doesn't exist yet
     // (the caller will create it if needed)
@@ -124,7 +130,7 @@ mod discovery;
 
 use state::{AppState, PlaybackState, VisualizerNote};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct MidiFile {
     name: String,
     path: String,
@@ -1389,6 +1395,447 @@ async fn is_discovery_server_running() -> Result<bool, String> {
 }
 
 #[tauri::command]
+async fn load_favorites() -> Result<serde_json::Value, String> {
+    let path = get_data_path("favorites.json")?;
+    if path.exists() {
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read favorites: {}", e))?;
+        let json: serde_json::Value = serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse favorites: {}", e))?;
+        Ok(json)
+    } else {
+        Ok(serde_json::json!([]))
+    }
+}
+
+#[tauri::command]
+async fn save_favorites(favorites: serde_json::Value) -> Result<(), String> {
+    let path = get_data_path("favorites.json")?;
+    let content = serde_json::to_string_pretty(&favorites)
+        .map_err(|e| format!("Failed to serialize favorites: {}", e))?;
+    std::fs::write(&path, content)
+        .map_err(|e| format!("Failed to write favorites: {}", e))?;
+    Ok(())
+}
+
+#[tauri::command]
+async fn load_playlists() -> Result<serde_json::Value, String> {
+    let path = get_data_path("playlists.json")?;
+    if path.exists() {
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| format!("Failed to read playlists: {}", e))?;
+        let json: serde_json::Value = serde_json::from_str(&content)
+            .map_err(|e| format!("Failed to parse playlists: {}", e))?;
+        Ok(json)
+    } else {
+        Ok(serde_json::json!([]))
+    }
+}
+
+#[tauri::command]
+async fn save_playlists(playlists: serde_json::Value) -> Result<(), String> {
+    let path = get_data_path("playlists.json")?;
+    let content = serde_json::to_string_pretty(&playlists)
+        .map_err(|e| format!("Failed to serialize playlists: {}", e))?;
+    std::fs::write(&path, content)
+        .map_err(|e| format!("Failed to write playlists: {}", e))?;
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ExportTrack {
+    name: String,
+    filename: String,
+    duration: f64,
+    bpm: u16,
+    note_density: f32,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct ExportMetadata {
+    export_type: String,
+    name: String,
+    tracks: Vec<ExportTrack>,
+    exported_at: String,
+    version: String,
+}
+
+// Export favorites to a zip file containing MIDI files and metadata
+#[tauri::command]
+async fn export_favorites(
+    favorites: Vec<serde_json::Value>,
+    export_path: String,
+) -> Result<(), String> {
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+
+    let file = std::fs::File::create(&export_path)
+        .map_err(|e| format!("Failed to create zip file: {}", e))?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    let mut export_tracks = Vec::new();
+
+    for fav in &favorites {
+        // Skip favorites without path (not yet hydrated from library)
+        let path = match fav["path"].as_str() {
+            Some(p) if !p.is_empty() => p,
+            _ => {
+                println!("[EXPORT] Skipping favorite without path: {:?}", fav["name"]);
+                continue;
+            }
+        };
+        let name = fav["name"].as_str().unwrap_or("Unknown");
+        let duration = fav["duration"].as_f64().unwrap_or(0.0);
+        let bpm = fav["bpm"].as_u64().unwrap_or(120) as u16;
+        let note_density = fav["note_density"].as_f64().unwrap_or(0.0) as f32;
+
+        let source_path = std::path::Path::new(path);
+        if !source_path.exists() {
+            println!("[EXPORT] File not found, skipping: {}", path);
+            continue;
+        }
+
+        let filename = source_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown.mid")
+            .to_string();
+
+        // Add MIDI file to zip
+        let midi_data = std::fs::read(source_path)
+            .map_err(|e| format!("Failed to read MIDI file {}: {}", filename, e))?;
+
+        zip.start_file(&filename, options)
+            .map_err(|e| format!("Failed to add file to zip: {}", e))?;
+        zip.write_all(&midi_data)
+            .map_err(|e| format!("Failed to write file data: {}", e))?;
+
+        export_tracks.push(ExportTrack {
+            name: name.to_string(),
+            filename: filename.clone(),
+            duration,
+            bpm,
+            note_density,
+        });
+
+        println!("[EXPORT] Added: {} -> {}", name, filename);
+    }
+
+    // Add metadata JSON
+    let metadata = ExportMetadata {
+        export_type: "favorites".to_string(),
+        name: "Favorites".to_string(),
+        tracks: export_tracks,
+        exported_at: chrono_now(),
+        version: "1.0".to_string(),
+    };
+
+    let metadata_json = serde_json::to_string_pretty(&metadata)
+        .map_err(|e| format!("Failed to serialize metadata: {}", e))?;
+
+    zip.start_file("metadata.json", options)
+        .map_err(|e| format!("Failed to add metadata to zip: {}", e))?;
+    zip.write_all(metadata_json.as_bytes())
+        .map_err(|e| format!("Failed to write metadata: {}", e))?;
+
+    zip.finish()
+        .map_err(|e| format!("Failed to finalize zip: {}", e))?;
+
+    Ok(())
+}
+
+// Export a playlist to a zip file containing MIDI files and metadata
+#[tauri::command]
+async fn export_playlist(
+    playlist_name: String,
+    tracks: Vec<serde_json::Value>,
+    export_path: String,
+) -> Result<(), String> {
+    use std::io::Write;
+    use zip::write::SimpleFileOptions;
+
+    let file = std::fs::File::create(&export_path)
+        .map_err(|e| format!("Failed to create zip file: {}", e))?;
+    let mut zip = zip::ZipWriter::new(file);
+    let options = SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+
+    let mut export_tracks = Vec::new();
+
+    for track in &tracks {
+        // Skip tracks without path (not yet hydrated from library)
+        let path = match track["path"].as_str() {
+            Some(p) if !p.is_empty() => p,
+            _ => {
+                println!("[EXPORT] Skipping track without path: {:?}", track["name"]);
+                continue;
+            }
+        };
+        let name = track["name"].as_str().unwrap_or("Unknown");
+        let duration = track["duration"].as_f64().unwrap_or(0.0);
+        let bpm = track["bpm"].as_u64().unwrap_or(120) as u16;
+        let note_density = track["note_density"].as_f64().unwrap_or(0.0) as f32;
+
+        let source_path = std::path::Path::new(path);
+        if !source_path.exists() {
+            println!("[EXPORT] File not found, skipping: {}", path);
+            continue;
+        }
+
+        let filename = source_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown.mid")
+            .to_string();
+
+        // Add MIDI file to zip
+        let midi_data = std::fs::read(source_path)
+            .map_err(|e| format!("Failed to read MIDI file {}: {}", filename, e))?;
+
+        zip.start_file(&filename, options)
+            .map_err(|e| format!("Failed to add file to zip: {}", e))?;
+        zip.write_all(&midi_data)
+            .map_err(|e| format!("Failed to write file data: {}", e))?;
+
+        export_tracks.push(ExportTrack {
+            name: name.to_string(),
+            filename: filename.clone(),
+            duration,
+            bpm,
+            note_density,
+        });
+
+        println!("[EXPORT] Added: {} -> {}", name, filename);
+    }
+
+    // Add metadata JSON
+    let metadata = ExportMetadata {
+        export_type: "playlist".to_string(),
+        name: playlist_name,
+        tracks: export_tracks,
+        exported_at: chrono_now(),
+        version: "1.0".to_string(),
+    };
+
+    let metadata_json = serde_json::to_string_pretty(&metadata)
+        .map_err(|e| format!("Failed to serialize metadata: {}", e))?;
+
+    zip.start_file("metadata.json", options)
+        .map_err(|e| format!("Failed to add metadata to zip: {}", e))?;
+    zip.write_all(metadata_json.as_bytes())
+        .map_err(|e| format!("Failed to write metadata: {}", e))?;
+
+    zip.finish()
+        .map_err(|e| format!("Failed to finalize zip: {}", e))?;
+
+    Ok(())
+}
+
+// Import result structure
+#[derive(Debug, Serialize, Deserialize)]
+struct ImportResult {
+    imported_files: Vec<MidiFile>,
+    export_type: String,
+    name: String,
+}
+
+// Compute hash from bytes in memory (matches compute_file_hash logic)
+fn compute_hash_from_bytes(data: &[u8]) -> String {
+    let file_size = data.len() as u64;
+    let bytes_to_read = std::cmp::min(8192, data.len());
+
+    let mut hash: u64 = file_size;
+    for byte in &data[..bytes_to_read] {
+        hash = hash.wrapping_mul(31).wrapping_add(*byte as u64);
+    }
+
+    format!("{:016x}", hash)
+}
+
+// Build a map of hash -> MidiFile for existing files in album
+fn get_existing_files_by_hash(album_dir: &std::path::Path) -> std::collections::HashMap<String, MidiFile> {
+    let mut map = std::collections::HashMap::new();
+
+    if let Ok(entries) = std::fs::read_dir(album_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("mid") {
+                if let Some(hash) = compute_file_hash(&path) {
+                    let name = path.file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("Unknown")
+                        .to_string();
+
+                    let meta = midi::get_midi_metadata(&path.to_string_lossy())
+                        .unwrap_or(midi::MidiMetadata {
+                            duration: 0.0, bpm: 120, note_count: 0, note_density: 0.0
+                        });
+
+                    let file_size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+
+                    map.insert(hash.clone(), MidiFile {
+                        name,
+                        path: path.to_string_lossy().to_string(),
+                        duration: meta.duration,
+                        bpm: meta.bpm,
+                        note_density: meta.note_density,
+                        hash,
+                        size: file_size,
+                    });
+                }
+            }
+        }
+    }
+
+    map
+}
+
+// Import a zip file containing MIDI files (from exported favorites/playlist)
+#[tauri::command]
+async fn import_zip(zip_path: String) -> Result<ImportResult, String> {
+    use std::io::Read;
+
+    let file = std::fs::File::open(&zip_path)
+        .map_err(|e| format!("Failed to open zip file: {}", e))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| format!("Failed to read zip archive: {}", e))?;
+
+    let album_dir = get_album_folder()?;
+
+    // Create album folder if it doesn't exist
+    if !album_dir.exists() {
+        std::fs::create_dir_all(&album_dir)
+            .map_err(|e| format!("Failed to create album folder: {}", e))?;
+    }
+
+    // Get existing files by hash to skip duplicates
+    let existing_files = get_existing_files_by_hash(&album_dir);
+
+    let mut imported_files = Vec::new();
+    let mut export_type = "unknown".to_string();
+    let mut export_name = "Import".to_string();
+
+    // First pass: read metadata if exists
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
+        if file.name() == "metadata.json" {
+            let mut contents = String::new();
+            file.read_to_string(&mut contents).ok();
+            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&contents) {
+                export_type = meta["export_type"].as_str().unwrap_or("unknown").to_string();
+                export_name = meta["name"].as_str().unwrap_or("Import").to_string();
+            }
+            break;
+        }
+    }
+
+    // Re-open archive for extraction (can't reuse after iteration)
+    let file = std::fs::File::open(&zip_path)
+        .map_err(|e| format!("Failed to reopen zip file: {}", e))?;
+    let mut archive = zip::ZipArchive::new(file)
+        .map_err(|e| format!("Failed to read zip archive: {}", e))?;
+
+    // Second pass: extract MIDI files
+    for i in 0..archive.len() {
+        let mut file = archive.by_index(i).map_err(|e| e.to_string())?;
+        let filename = file.name().to_string();
+
+        // Skip metadata and non-MIDI files
+        if filename == "metadata.json" || !filename.to_lowercase().ends_with(".mid") {
+            continue;
+        }
+
+        // Read file contents
+        let mut contents = Vec::new();
+        file.read_to_end(&mut contents)
+            .map_err(|e| format!("Failed to read {}: {}", filename, e))?;
+
+        // Verify it's a valid MIDI file
+        if contents.len() < 4 || &contents[0..4] != b"MThd" {
+            println!("[IMPORT] Skipping invalid MIDI: {}", filename);
+            continue;
+        }
+
+        // Compute hash to check if file already exists
+        let file_hash = compute_hash_from_bytes(&contents);
+
+        // Check if file with same hash already exists
+        if let Some(existing) = existing_files.get(&file_hash).cloned() {
+            println!("[IMPORT] Skipping duplicate (hash exists): {} -> {}", filename, existing.path);
+            imported_files.push(existing);
+            continue;
+        }
+
+        // Determine save path (handle filename duplicates)
+        let mut save_path = album_dir.join(&filename);
+        let mut counter = 1;
+        while save_path.exists() {
+            let stem = filename.trim_end_matches(".mid");
+            save_path = album_dir.join(format!("{} ({}).mid", stem, counter));
+            counter += 1;
+        }
+
+        // Write file
+        std::fs::write(&save_path, &contents)
+            .map_err(|e| format!("Failed to save {}: {}", filename, e))?;
+
+        // Get metadata for the imported file
+        let name = save_path.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Unknown")
+            .to_string();
+
+        let meta = midi::get_midi_metadata(&save_path.to_string_lossy())
+            .unwrap_or(midi::MidiMetadata {
+                duration: 0.0, bpm: 120, note_count: 0, note_density: 0.0
+            });
+
+        let file_size = contents.len() as u64;
+
+        imported_files.push(MidiFile {
+            name,
+            path: save_path.to_string_lossy().to_string(),
+            duration: meta.duration,
+            bpm: meta.bpm,
+            note_density: meta.note_density,
+            hash: file_hash,
+            size: file_size,
+        });
+
+        println!("[IMPORT] Imported: {}", save_path.to_string_lossy());
+    }
+
+    Ok(ImportResult {
+        imported_files,
+        export_type,
+        name: export_name,
+    })
+}
+
+// Helper to get current timestamp (simple implementation without chrono crate)
+fn chrono_now() -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let duration = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default();
+    let secs = duration.as_secs();
+    // Convert to simple ISO-like format
+    let days = secs / 86400;
+    let years_since_1970 = days / 365;
+    let year = 1970 + years_since_1970;
+    let remaining_days = days % 365;
+    let month = (remaining_days / 30) + 1;
+    let day = (remaining_days % 30) + 1;
+    let time_of_day = secs % 86400;
+    let hours = time_of_day / 3600;
+    let minutes = (time_of_day % 3600) / 60;
+    let seconds = time_of_day % 60;
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z", year, month, day, hours, minutes, seconds)
+}
+
+#[tauri::command]
 async fn install_update(zip_path: String, app_handle: AppHandle) -> Result<(), String> {
     println!("[UPDATE] Installing from: {}", zip_path);
 
@@ -1666,6 +2113,13 @@ fn main() {
             install_update,
             start_discovery_server,
             is_discovery_server_running,
+            load_favorites,
+            save_favorites,
+            load_playlists,
+            save_playlists,
+            export_favorites,
+            export_playlist,
+            import_zip,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

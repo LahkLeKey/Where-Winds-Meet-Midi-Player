@@ -25,6 +25,7 @@ ureq = "2"
 base64 = "0.22"
 axum = "0.7"
 tower-http = { version = "0.5", features = ["cors"] }
+zip = "2"
 
 [features]
 default = ["custom-protocol"]

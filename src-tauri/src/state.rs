@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicI8, AtomicU16, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicI8, AtomicU16, Ordering};
 use std::time::Instant;
 use tauri::Window;
 use serde::{Serialize, Deserialize};

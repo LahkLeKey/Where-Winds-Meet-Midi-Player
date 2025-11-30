@@ -166,21 +166,59 @@ function loadStats() {
   }
 }
 
-// Initialize from localStorage
+// Initialize storage - load from files with localStorage fallback
 export async function initializeStorage() {
   // Load stats first
   loadStats();
   incrementSession();
 
   try {
-    const storedFavorites = localStorage.getItem(STORAGE_KEYS.FAVORITES);
-    if (storedFavorites) {
-      favorites.set(JSON.parse(storedFavorites));
+    // Load favorites from file, fallback to localStorage
+    try {
+      const fileFavorites = await invoke('load_favorites');
+      if (Array.isArray(fileFavorites) && fileFavorites.length > 0) {
+        favorites.set(fileFavorites);
+      } else {
+        // Fallback to localStorage (for migration)
+        const storedFavorites = localStorage.getItem(STORAGE_KEYS.FAVORITES);
+        if (storedFavorites) {
+          const parsed = JSON.parse(storedFavorites);
+          favorites.set(parsed);
+          // Migrate to file
+          await invoke('save_favorites', { favorites: parsed });
+          localStorage.removeItem(STORAGE_KEYS.FAVORITES);
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to load favorites from file, using localStorage:', e);
+      const storedFavorites = localStorage.getItem(STORAGE_KEYS.FAVORITES);
+      if (storedFavorites) {
+        favorites.set(JSON.parse(storedFavorites));
+      }
     }
 
-    const storedPlaylists = localStorage.getItem(STORAGE_KEYS.PLAYLISTS);
-    if (storedPlaylists) {
-      savedPlaylists.set(JSON.parse(storedPlaylists));
+    // Load playlists from file, fallback to localStorage
+    try {
+      const filePlaylists = await invoke('load_playlists');
+      if (Array.isArray(filePlaylists) && filePlaylists.length > 0) {
+        savedPlaylists.set(filePlaylists);
+      } else {
+        // Fallback to localStorage (for migration)
+        const storedPlaylists = localStorage.getItem(STORAGE_KEYS.PLAYLISTS);
+        if (storedPlaylists) {
+          const parsed = JSON.parse(storedPlaylists);
+          savedPlaylists.set(parsed);
+          // Migrate to file
+          await invoke('save_playlists', { playlists: parsed });
+          localStorage.removeItem(STORAGE_KEYS.PLAYLISTS);
+        }
+      }
+    } catch (e) {
+      console.warn('Failed to load playlists from file, using localStorage:', e);
+      const storedPlaylists = localStorage.getItem(STORAGE_KEYS.PLAYLISTS);
+      if (storedPlaylists) {
+        savedPlaylists.set(JSON.parse(storedPlaylists));
+      }
     }
 
     const storedActivePlaylist = localStorage.getItem(STORAGE_KEYS.ACTIVE_PLAYLIST);
@@ -222,35 +260,56 @@ export async function initializeStorage() {
       await invoke('set_speed', { speed: spd });
     }
   } catch (error) {
-    console.error('Failed to load from localStorage:', error);
+    console.error('Failed to load from storage:', error);
   }
 }
 
-// Save favorites to localStorage
-function saveFavorites(favs) {
+// Strip path from file data (path is hydrated from midiFiles on load)
+function stripPath(file) {
+  const { path, ...rest } = file;
+  return rest;
+}
+
+// Save favorites to file with localStorage fallback (without paths)
+async function saveFavorites(favs) {
+  const stripped = favs.map(stripPath);
   try {
-    localStorage.setItem(STORAGE_KEYS.FAVORITES, JSON.stringify(favs));
+    await invoke('save_favorites', { favorites: stripped });
   } catch (error) {
-    console.error('Failed to save favorites:', error);
+    console.error('Failed to save favorites to file, using localStorage:', error);
+    try {
+      localStorage.setItem(STORAGE_KEYS.FAVORITES, JSON.stringify(stripped));
+    } catch (e) {
+      console.error('Failed to save favorites to localStorage:', e);
+    }
   }
 }
 
-// Save playlists to localStorage
-function savePlaylists(lists) {
+// Save playlists to file with localStorage fallback (without paths)
+async function savePlaylists(lists) {
+  const stripped = lists.map(playlist => ({
+    ...playlist,
+    tracks: playlist.tracks.map(stripPath)
+  }));
   try {
-    localStorage.setItem(STORAGE_KEYS.PLAYLISTS, JSON.stringify(lists));
+    await invoke('save_playlists', { playlists: stripped });
   } catch (error) {
-    console.error('Failed to save playlists:', error);
+    console.error('Failed to save playlists to file, using localStorage:', error);
+    try {
+      localStorage.setItem(STORAGE_KEYS.PLAYLISTS, JSON.stringify(stripped));
+    } catch (e) {
+      console.error('Failed to save playlists to localStorage:', e);
+    }
   }
 }
 
-// Favorites operations
+// Favorites operations (uses hash for identification, survives renames)
 export function toggleFavorite(file) {
   favorites.update(favs => {
-    const exists = favs.find(f => f.path === file.path);
+    const exists = favs.find(f => f.hash === file.hash);
     let newFavs;
     if (exists) {
-      newFavs = favs.filter(f => f.path !== file.path);
+      newFavs = favs.filter(f => f.hash !== file.hash);
     } else {
       newFavs = [...favs, file];
     }
@@ -259,12 +318,36 @@ export function toggleFavorite(file) {
   });
 }
 
-export function isFavorite(path) {
+export function isFavorite(hash) {
   let result = false;
   favorites.subscribe(favs => {
-    result = favs.some(f => f.path === path);
+    result = favs.some(f => f.hash === hash);
   })();
   return result;
+}
+
+// Sync favorites with current midiFiles (hydrate paths, remove deleted)
+// Note: Does NOT save - only updates in-memory state
+export function syncFavoritesWithLibrary(files) {
+  const filesByHash = new Map(files.map(f => [f.hash, f]));
+  favorites.update(favs => {
+    if (favs.length === 0) return favs; // Don't process if not loaded yet
+    return favs
+      .map(fav => filesByHash.get(fav.hash) || fav)
+      .filter(fav => filesByHash.has(fav.hash)); // Remove deleted files
+  });
+}
+
+// Clear all favorites
+export function clearAllFavorites() {
+  favorites.set([]);
+  saveFavorites([]);
+}
+
+// Reorder favorites (from drag-drop)
+export function reorderFavorites(newOrder) {
+  favorites.set(newOrder);
+  saveFavorites(newOrder);
 }
 
 // Playlist operations
@@ -314,8 +397,8 @@ export function addToSavedPlaylist(playlistId, file) {
   savedPlaylists.update(lists => {
     const newLists = lists.map(p => {
       if (p.id === playlistId) {
-        // Check for duplicate
-        if (!p.tracks.find(t => t.path === file.path)) {
+        // Check for duplicate by hash
+        if (!p.tracks.find(t => t.hash === file.hash)) {
           return { ...p, tracks: [...p.tracks, file] };
         }
       }
@@ -326,16 +409,31 @@ export function addToSavedPlaylist(playlistId, file) {
   });
 }
 
-export function removeFromSavedPlaylist(playlistId, filePath) {
+export function removeFromSavedPlaylist(playlistId, fileHash) {
   savedPlaylists.update(lists => {
     const newLists = lists.map(p => {
       if (p.id === playlistId) {
-        return { ...p, tracks: p.tracks.filter(t => t.path !== filePath) };
+        return { ...p, tracks: p.tracks.filter(t => t.hash !== fileHash) };
       }
       return p;
     });
     savePlaylists(newLists);
     return newLists;
+  });
+}
+
+// Sync playlists with current midiFiles (hydrate paths, remove deleted)
+// Note: Does NOT save - only updates in-memory state
+export function syncPlaylistsWithLibrary(files) {
+  const filesByHash = new Map(files.map(f => [f.hash, f]));
+  savedPlaylists.update(lists => {
+    if (lists.length === 0) return lists; // Don't process if not loaded yet
+    return lists.map(p => ({
+      ...p,
+      tracks: p.tracks
+        .map(t => filesByHash.get(t.hash) || t)
+        .filter(t => filesByHash.has(t.hash)) // Remove deleted files
+    }));
   });
 }
 
@@ -355,6 +453,20 @@ export function reorderSavedPlaylist(playlistId, fromIndex, toIndex) {
   });
 }
 
+// Set playlist tracks (for drag-drop reordering)
+export function setPlaylistTracks(playlistId, newTracks) {
+  savedPlaylists.update(lists => {
+    const newLists = lists.map(p => {
+      if (p.id === playlistId) {
+        return { ...p, tracks: newTracks };
+      }
+      return p;
+    });
+    savePlaylists(newLists);
+    return newLists;
+  });
+}
+
 export function reorderPlaylists(fromIndex, toIndex) {
   savedPlaylists.update(lists => {
     const newLists = [...lists];
@@ -363,6 +475,12 @@ export function reorderPlaylists(fromIndex, toIndex) {
     savePlaylists(newLists);
     return newLists;
   });
+}
+
+// Set playlists order (for drag-drop reordering)
+export function setPlaylistsOrder(newOrder) {
+  savedPlaylists.set(newOrder);
+  savePlaylists(newOrder);
 }
 
 export async function loadPlaylistToQueue(playlistId, autoPlay = true) {
@@ -401,6 +519,9 @@ export async function loadMidiFiles() {
   try {
     const files = await invoke('load_midi_files');
     midiFiles.set(files);
+    // Sync favorites and playlists with updated file paths
+    syncFavoritesWithLibrary(files);
+    syncPlaylistsWithLibrary(files);
   } catch (error) {
     console.error('Failed to load MIDI files:', error);
   }

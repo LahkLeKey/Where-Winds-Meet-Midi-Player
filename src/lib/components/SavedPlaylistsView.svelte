@@ -4,8 +4,12 @@
   import { flip } from "svelte/animate";
   import { onMount } from "svelte";
   import { dndzone } from "svelte-dnd-action";
+  import { invoke } from "@tauri-apps/api/core";
+  import { save, open } from "@tauri-apps/plugin-dialog";
   import {
     savedPlaylists,
+    midiFiles,
+    loadMidiFiles,
     createPlaylist,
     deletePlaylist,
     renamePlaylist,
@@ -13,10 +17,24 @@
     reorderPlaylists,
     removeFromSavedPlaylist,
     reorderSavedPlaylist,
+    setPlaylistTracks,
+    setPlaylistsOrder,
+    addToSavedPlaylist,
     playMidi,
     playlist,
     activePlaylistId,
   } from "../stores/player.js";
+  import SongContextMenu from "./SongContextMenu.svelte";
+
+  // Context menu
+  let contextMenu = null;
+  let isExporting = false;
+  let isImporting = false;
+
+  function handleContextMenu(e, file) {
+    e.preventDefault();
+    contextMenu = { x: e.clientX, y: e.clientY, file };
+  }
 
   let scrollContainer;
   let showTopMask = false;
@@ -64,7 +82,7 @@
   $: trackItems = selectedPlaylist
     ? selectedPlaylist.tracks.map((track, index) => ({
         ...track,
-        id: track.path, // Use path as unique ID
+        id: track.hash, // Use hash as unique ID (survives renames)
         originalIndex: index,
       }))
     : [];
@@ -121,10 +139,9 @@
 
   function handleDndFinalize(e) {
     const newItems = e.detail.items;
-    // Update the store with new order
-    savedPlaylists.set(
-      newItems.map(({ originalIndex, ...pl }) => pl)
-    );
+    // Update the store with new order and persist to file
+    const newOrder = newItems.map(({ originalIndex, ...pl }) => pl);
+    setPlaylistsOrder(newOrder);
     items = newItems.map((item, index) => ({
       ...item,
       originalIndex: index,
@@ -148,30 +165,13 @@
     if (!selectedPlaylistId) return;
 
     const newItems = e.detail.items;
-    // Update the store with new track order and persist
-    savedPlaylists.update((lists) => {
-      const newLists = lists.map((p) => {
-        if (p.id === selectedPlaylistId) {
-          return {
-            ...p,
-            tracks: newItems.map(({ id, originalIndex, ...track }) => track),
-          };
-        }
-        return p;
-      });
-      // Persist to localStorage
-      try {
-        localStorage.setItem("wwm-playlists", JSON.stringify(newLists));
-      } catch (error) {
-        console.error("Failed to save playlists:", error);
-      }
-      return newLists;
-    });
+    const newTracks = newItems.map(({ id, originalIndex, ...track }) => track);
+    setPlaylistTracks(selectedPlaylistId, newTracks);
   }
 
-  function handleRemoveTrack(trackPath) {
+  function handleRemoveTrack(trackHash) {
     if (selectedPlaylistId) {
-      removeFromSavedPlaylist(selectedPlaylistId, trackPath);
+      removeFromSavedPlaylist(selectedPlaylistId, trackHash);
     }
   }
 
@@ -184,6 +184,76 @@
       return list;
     });
     await playMidi(track.path);
+  }
+
+  async function exportPlaylist(pl = null) {
+    const targetPlaylist = pl || selectedPlaylist;
+    if (!targetPlaylist || targetPlaylist.tracks.length === 0 || isExporting) return;
+
+    try {
+      isExporting = true;
+      const safeFilename = targetPlaylist.name.replace(/[<>:"/\\|?*]/g, "_");
+      const exportPath = await save({
+        title: "Export Playlist",
+        defaultPath: `${safeFilename}.zip`,
+        filters: [{ name: "Zip Archive", extensions: ["zip"] }],
+      });
+
+      if (exportPath) {
+        // Hydrate tracks with paths from midiFiles using hash
+        const filesByHash = new Map($midiFiles.map(f => [f.hash, f]));
+        const hydratedTracks = targetPlaylist.tracks
+          .map(track => filesByHash.get(track.hash) || track)
+          .filter(track => track.path); // Only include files with valid paths
+
+        await invoke("export_playlist", {
+          playlistName: targetPlaylist.name,
+          tracks: hydratedTracks,
+          exportPath,
+        });
+      }
+    } catch (error) {
+      console.error("Failed to export playlist:", error);
+    } finally {
+      isExporting = false;
+    }
+  }
+
+  async function importPlaylist() {
+    if (isImporting) return;
+
+    try {
+      isImporting = true;
+      const zipPath = await open({
+        title: "Import Playlist",
+        filters: [{ name: "Zip Archive", extensions: ["zip"] }],
+      });
+
+      if (zipPath) {
+        const result = await invoke("import_zip", { zipPath });
+
+        // Reload library to include new files
+        await loadMidiFiles();
+
+        // Create a new playlist with imported files
+        if (result.imported_files.length > 0) {
+          const playlistName = result.export_type === "playlist" ? result.name : "Imported";
+          const newPlaylistId = createPlaylist(playlistName);
+
+          // Add all imported files to the new playlist
+          for (const file of result.imported_files) {
+            addToSavedPlaylist(newPlaylistId, file);
+          }
+
+          // Select the new playlist
+          selectedPlaylistId = newPlaylistId;
+        }
+      }
+    } catch (error) {
+      console.error("Failed to import:", error);
+    } finally {
+      isImporting = false;
+    }
   }
 </script>
 
@@ -241,6 +311,14 @@
         </button>
         <button
           class="spotify-button spotify-button--secondary flex items-center gap-2"
+          onclick={exportPlaylist}
+          disabled={selectedPlaylist.tracks.length === 0 || isExporting}
+          title="Export playlist with MIDI files"
+        >
+          <Icon icon={isExporting ? "mdi:loading" : "mdi:export"} class="w-4 h-4 {isExporting ? 'animate-spin' : ''}" />
+        </button>
+        <button
+          class="spotify-button spotify-button--secondary flex items-center gap-2"
           onclick={() => handleDelete(selectedPlaylist.id)}
         >
           <Icon icon="mdi:delete-outline" class="w-4 h-4" />
@@ -265,6 +343,7 @@
         <div
           class="group spotify-list-item flex items-center gap-3 py-2 mb-1 cursor-grab active:cursor-grabbing hover:bg-white/5"
           animate:flip={{ duration: flipDurationMs }}
+          oncontextmenu={(e) => handleContextMenu(e, track)}
         >
           <!-- Drag Handle -->
           <div class="text-white/30 hover:text-white/60 transition-colors flex-shrink-0">
@@ -291,7 +370,9 @@
             <p class="text-sm font-medium text-white truncate group-hover:text-[#1db954] transition-colors">
               {track.name}
             </p>
-            <p class="text-xs text-white/40">MIDI Track</p>
+            <p class="text-xs text-white/40">
+              {track.bpm || 120} BPM • {#if (track.note_density || 0) < 3}Easy{:else if (track.note_density || 0) < 6}Medium{:else if (track.note_density || 0) < 10}Hard{:else}Expert{/if}
+            </p>
           </div>
 
           <!-- Duration -->
@@ -306,7 +387,7 @@
             class="p-1.5 rounded-full text-white/30 opacity-0 group-hover:opacity-100 hover:text-red-400 hover:bg-red-500/20 transition-all flex-shrink-0"
             onclick={(e) => {
               e.stopPropagation();
-              handleRemoveTrack(track.path);
+              handleRemoveTrack(track.hash);
             }}
             title="Remove from playlist"
           >
@@ -345,13 +426,24 @@
             {$savedPlaylists.length} playlists
           </p>
         </div>
-        <button
-          class="spotify-button spotify-button--secondary flex items-center gap-2"
-          onclick={() => (showCreateModal = true)}
-        >
-          <Icon icon="mdi:plus" class="w-4 h-4" />
-          New
-        </button>
+        <div class="flex items-center gap-2">
+          <button
+            class="spotify-button spotify-button--secondary flex items-center gap-2"
+            onclick={importPlaylist}
+            disabled={isImporting}
+            title="Import playlist from zip"
+          >
+            <Icon icon={isImporting ? "mdi:loading" : "mdi:import"} class="w-4 h-4 {isImporting ? 'animate-spin' : ''}" />
+            Import
+          </button>
+          <button
+            class="spotify-button spotify-button--secondary flex items-center gap-2"
+            onclick={() => (showCreateModal = true)}
+          >
+            <Icon icon="mdi:plus" class="w-4 h-4" />
+            New
+          </button>
+        </div>
       </div>
     </div>
 
@@ -425,6 +517,17 @@
                   title="Play playlist"
                 >
                   <Icon icon="mdi:play" class="w-5 h-5" />
+                </button>
+                <button
+                  class="p-2 rounded-full hover:bg-white/10 text-white/60 hover:text-white transition-all"
+                  onclick={(e) => {
+                    e.stopPropagation();
+                    exportPlaylist(playlist);
+                  }}
+                  disabled={playlist.tracks.length === 0 || isExporting}
+                  title="Export playlist"
+                >
+                  <Icon icon={isExporting ? "mdi:loading" : "mdi:export"} class="w-4 h-4 {isExporting ? 'animate-spin' : ''}" />
                 </button>
                 <button
                   class="p-2 rounded-full hover:bg-white/10 text-white/60 hover:text-white transition-all"
@@ -606,6 +709,10 @@
     </div>
   </div>
 {/if}
+
+<svelte:window onclick={() => contextMenu = null} />
+
+<SongContextMenu {contextMenu} onClose={() => contextMenu = null} />
 
 <style>
   :global(.spotify-card) {

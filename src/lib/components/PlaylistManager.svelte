@@ -10,6 +10,15 @@
     isPlaying,
     isPaused,
   } from "../stores/player.js";
+  import SongContextMenu from "./SongContextMenu.svelte";
+
+  // Context menu
+  let contextMenu = null;
+
+  function handleContextMenu(e, file) {
+    e.preventDefault();
+    contextMenu = { x: e.clientX, y: e.clientY, file };
+  }
 
   const flipDurationMs = 300;
 
@@ -20,7 +29,7 @@
     if (!isDragging) {
       items = $playlist.map((file) => ({
         ...file,
-        id: file.path,
+        id: file.hash,
       }));
     }
   }
@@ -114,6 +123,7 @@
             : 'hover:bg-white/5'}"
           role="listitem"
           animate:flip={{ duration: flipDurationMs }}
+          oncontextmenu={(e) => handleContextMenu(e, item)}
         >
           <!-- Drag Handle -->
           <div
@@ -177,7 +187,9 @@
             >
               {item.name}
             </p>
-            <p class="text-xs text-white/40">MIDI Track</p>
+            <p class="text-xs text-white/40">
+              {item.bpm || 120} BPM • {#if (item.note_density || 0) < 3}Easy{:else if (item.note_density || 0) < 6}Medium{:else if (item.note_density || 0) < 10}Hard{:else}Expert{/if}
+            </p>
           </div>
 
           <!-- Duration -->
@@ -222,6 +234,10 @@
     </div>
   {/if}
 </div>
+
+<svelte:window onclick={() => contextMenu = null} />
+
+<SongContextMenu {contextMenu} onClose={() => contextMenu = null} />
 
 <style>
   .dnd-zone {
