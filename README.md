@@ -151,7 +151,7 @@ Share and discover MIDI files with other users! The Song Library uses peer-to-pe
 **How to use:**
 1. Go to the **Share** tab in the Online section
 2. Toggle **Enable Sharing** to connect
-3. Your songs are automatically shared with other users
+3. Choose songs to share (share all or select specific songs)
 4. Browse songs from other users and click to download
 5. Downloaded songs are added to your library
 
@@ -161,6 +161,15 @@ Share and discover MIDI files with other users! The Song Library uses peer-to-pe
 - Download progress shown in real-time
 - Auto-connects on app restart if previously enabled
 - Custom discovery server URL (advanced users)
+- **Share picker** - Full-screen UI with alphabet navigation, search, and batch selection for managing which songs to share
+- **Floating notifications** - Download progress and errors shown in a floating bottom bar
+
+**Security features:**
+- All downloaded files are verified to be valid MIDI files before saving
+- Executable files (EXE, ELF, Mach-O, scripts, etc.) are automatically blocked
+- File headers are validated (MThd/MTrk MIDI headers required)
+- Maximum file size limit (50MB)
+- Filename sanitization prevents path traversal attacks
 
 **Privacy notes:**
 - Only file names and hashes are shared, not file contents until downloaded

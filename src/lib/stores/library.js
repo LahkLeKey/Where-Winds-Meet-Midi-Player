@@ -16,6 +16,7 @@ export const downloadProgress = writable(null);
 export const libraryError = writable(null);
 export const shareAll = writable(false);
 export const sharedSongs = writable([]);
+export const shareNotification = writable(null); // { songName, peerName, timestamp }
 
 // Internal state
 let peer = null;
@@ -297,10 +298,16 @@ function startFetchInterval() {
 function handleIncomingConnection(conn) {
   console.log('[LIBRARY] Incoming connection from:', conn.peer);
 
+  let peerName = 'Someone'; // Will be updated if peer sends their name
+
   conn.on('open', () => {
     conn.on('data', async (data) => {
       if (data.type === 'request_song') {
-        await handleSongRequest(data.hash, conn);
+        // Store peer name if provided
+        if (data.peerName) {
+          peerName = data.peerName;
+        }
+        await handleSongRequest(data.hash, conn, peerName);
       }
     });
   });
@@ -311,7 +318,7 @@ function handleIncomingConnection(conn) {
 }
 
 // Handle song request from peer
-async function handleSongRequest(hash, conn) {
+async function handleSongRequest(hash, conn, peerName = 'Someone') {
   try {
     const allSongs = await invoke('load_midi_files');
     const song = allSongs.find(s => (s.hash || hashString(s.path)) === hash);
@@ -339,7 +346,14 @@ async function handleSongRequest(hash, conn) {
       data: fileData
     });
 
-    console.log('[LIBRARY] Sent song:', song.name);
+    console.log('[LIBRARY] Sent song:', song.name, 'to', peerName);
+
+    // Emit notification that someone downloaded our song
+    shareNotification.set({
+      songName: song.name,
+      peerName: peerName,
+      timestamp: Date.now()
+    });
   } catch (err) {
     console.error('[LIBRARY] Failed to send song:', err);
     conn.send({ type: 'song_error', hash, error: err.toString() });
@@ -367,7 +381,8 @@ export async function requestSong(peerId, hash, songName) {
 
       conn.on('open', () => {
         downloadProgress.set({ songName, progress: 20, status: 'Requesting...' });
-        conn.send({ type: 'request_song', hash });
+        const myName = localStorage.getItem('libraryName') || 'Someone';
+        conn.send({ type: 'request_song', hash, peerName: myName });
       });
 
       conn.on('data', async (data) => {

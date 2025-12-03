@@ -1390,19 +1390,98 @@ async fn save_temp_midi(filename: String, data_base64: String) -> Result<String,
     let data = STANDARD.decode(&data_base64)
         .map_err(|e| format!("Failed to decode base64: {}", e))?;
 
-    // Verify it's a valid MIDI file
+    // SECURITY: Check for executable signatures first
+    if let Some(exe_type) = is_executable_data(&data) {
+        println!("[SECURITY] BLOCKED temp save: {} detected", exe_type);
+        return Err(format!("Security: Blocked {} - refusing to save", exe_type));
+    }
+
+    // Verify it's a valid MIDI file (must start with MThd)
     if data.len() < 4 || &data[0..4] != b"MThd" {
-        return Err("Not a valid MIDI file".to_string());
+        return Err("Not a valid MIDI file (missing MThd header)".to_string());
+    }
+
+    // Sanitize filename to prevent path traversal
+    let safe_filename: String = filename
+        .chars()
+        .filter(|c| !['/', '\\', ':', '*', '?', '"', '<', '>', '|', '\0'].contains(c))
+        .collect();
+
+    if safe_filename.is_empty() {
+        return Err("Invalid filename".to_string());
     }
 
     // Save to temp directory
     let temp_dir = std::env::temp_dir().join("wwm-band");
     std::fs::create_dir_all(&temp_dir).map_err(|e| format!("Failed to create temp dir: {}", e))?;
 
-    let temp_path = temp_dir.join(&filename);
+    let temp_path = temp_dir.join(&safe_filename);
     std::fs::write(&temp_path, &data).map_err(|e| format!("Failed to write temp file: {}", e))?;
 
     Ok(temp_path.to_string_lossy().to_string())
+}
+
+// SECURITY: Check if data contains executable signatures
+fn is_executable_data(data: &[u8]) -> Option<&'static str> {
+    if data.len() < 4 {
+        return None;
+    }
+
+    // Windows EXE/DLL (MZ header)
+    if data.len() >= 2 && &data[0..2] == b"MZ" {
+        return Some("Windows executable (MZ)");
+    }
+
+    // ELF (Linux executables)
+    if data.len() >= 4 && &data[0..4] == b"\x7FELF" {
+        return Some("Linux executable (ELF)");
+    }
+
+    // Mach-O (macOS executables) - both 32 and 64 bit, both endianness
+    if data.len() >= 4 {
+        let magic = &data[0..4];
+        if magic == b"\xFE\xED\xFA\xCE" || magic == b"\xFE\xED\xFA\xCF" ||
+           magic == b"\xCE\xFA\xED\xFE" || magic == b"\xCF\xFA\xED\xFE" {
+            return Some("macOS executable (Mach-O)");
+        }
+    }
+
+    // Java class files
+    if data.len() >= 4 && &data[0..4] == b"\xCA\xFE\xBA\xBE" {
+        return Some("Java class file");
+    }
+
+    // Shell scripts
+    if data.len() >= 2 && &data[0..2] == b"#!" {
+        return Some("Shell script");
+    }
+
+    // Windows batch files
+    if data.len() >= 5 {
+        let start = String::from_utf8_lossy(&data[0..10.min(data.len())]).to_lowercase();
+        if start.starts_with("@echo") || start.starts_with("rem ") {
+            return Some("Windows batch file");
+        }
+    }
+
+    // PowerShell scripts
+    if data.len() >= 10 {
+        let start = String::from_utf8_lossy(&data[0..100.min(data.len())]).to_lowercase();
+        if start.contains("powershell") || start.contains("invoke-") ||
+           start.contains("$env:") || start.contains("set-executionpolicy") {
+            return Some("PowerShell script");
+        }
+    }
+
+    // Check for PE header in first 1KB (embedded executables)
+    let check_len = 1024.min(data.len());
+    for i in 0..check_len.saturating_sub(4) {
+        if &data[i..i+4] == b"PE\x00\x00" {
+            return Some("Embedded PE executable");
+        }
+    }
+
+    None
 }
 
 // Verify MIDI data is valid (for P2P library safety)
@@ -1413,17 +1492,24 @@ async fn verify_midi_data(data_base64: String) -> Result<bool, String> {
     let data = STANDARD.decode(&data_base64)
         .map_err(|e| format!("Failed to decode base64: {}", e))?;
 
-    // Check minimum size
+    // SECURITY: Check for executable signatures first
+    if let Some(exe_type) = is_executable_data(&data) {
+        println!("[SECURITY] BLOCKED: {} detected in received file", exe_type);
+        return Err(format!("Security: Blocked {} - not a MIDI file", exe_type));
+    }
+
+    // Check minimum size for valid MIDI
     if data.len() < 14 {
         return Ok(false);
     }
 
-    // Check MIDI header "MThd"
+    // Check MIDI header "MThd" - MUST be first 4 bytes
     if &data[0..4] != b"MThd" {
+        println!("[SECURITY] Rejected: Missing MIDI header (MThd), got {:?}", &data[0..4.min(data.len())]);
         return Ok(false);
     }
 
-    // Check header length (should be 6)
+    // Check header length (should be 6 for standard MIDI)
     let header_len = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
     if header_len != 6 {
         return Ok(false);
@@ -1436,18 +1522,23 @@ async fn verify_midi_data(data_base64: String) -> Result<bool, String> {
 
     // Find MTrk header (should be at offset 14 after MThd)
     if &data[14..18] != b"MTrk" {
+        println!("[SECURITY] Rejected: Missing track header (MTrk)");
         return Ok(false);
     }
 
     // Verify file size is reasonable (max 50MB)
     if data.len() > 50 * 1024 * 1024 {
+        println!("[SECURITY] Rejected: File too large (>50MB)");
         return Ok(false);
     }
 
-    // Try to parse with midly to ensure it's actually valid
+    // Final validation: parse with midly to ensure it's valid MIDI structure
     match midly::Smf::parse(&data) {
         Ok(_) => Ok(true),
-        Err(_) => Ok(false),
+        Err(e) => {
+            println!("[SECURITY] Rejected: Invalid MIDI structure - {}", e);
+            Ok(false)
+        }
     }
 }
 
@@ -1459,12 +1550,18 @@ async fn save_midi_from_base64(filename: String, data_base64: String) -> Result<
     let data = STANDARD.decode(&data_base64)
         .map_err(|e| format!("Failed to decode base64: {}", e))?;
 
-    // Verify it's a valid MIDI file
-    if data.len() < 14 || &data[0..4] != b"MThd" {
-        return Err("Not a valid MIDI file".to_string());
+    // SECURITY: Check for executable signatures first
+    if let Some(exe_type) = is_executable_data(&data) {
+        println!("[SECURITY] BLOCKED save: {} detected", exe_type);
+        return Err(format!("Security: Blocked {} - refusing to save", exe_type));
     }
 
-    // Try to parse to ensure it's valid
+    // Verify it's a valid MIDI file (must start with MThd)
+    if data.len() < 14 || &data[0..4] != b"MThd" {
+        return Err("Not a valid MIDI file (missing MThd header)".to_string());
+    }
+
+    // Try to parse to ensure it's valid MIDI structure
     midly::Smf::parse(&data).map_err(|e| format!("Invalid MIDI file: {}", e))?;
 
     // Get album folder

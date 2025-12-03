@@ -180,7 +180,16 @@
   import LibraryShare from "./lib/components/LibraryShare.svelte";
 
   import { bandStatus, connectedPeers, bandSongSelectMode, cancelBandSongSelect, bandSelectedSong } from "./lib/stores/band.js";
-  import { libraryConnected, onlinePeers, initLibrary } from "./lib/stores/library.js";
+  import { libraryConnected, onlinePeers, initLibrary, shareNotification, libraryEnabled } from "./lib/stores/library.js";
+
+  // DEV: Simulate share notification for testing
+  function simulateShareNotification() {
+    shareNotification.set({
+      songName: "Test Song - Example MIDI File.mid",
+      peerName: "HappyMusician42",
+      timestamp: Date.now()
+    });
+  }
 
   import {
     loadMidiFiles,
@@ -311,6 +320,20 @@
   // Band mode connected peers count (excluding self)
   $: bandPeersCount = $bandStatus === 'connected' ? $connectedPeers.length : 0;
   $: libraryPeersCount = $libraryConnected ? $onlinePeers : 0;
+
+  // Auto-dismiss share notification after 5 seconds
+  let shareNotificationTimeout;
+  $: if ($shareNotification) {
+    if (shareNotificationTimeout) clearTimeout(shareNotificationTimeout);
+    shareNotificationTimeout = setTimeout(() => {
+      shareNotification.set(null);
+    }, 5000);
+  }
+
+  function dismissShareNotification() {
+    if (shareNotificationTimeout) clearTimeout(shareNotificationTimeout);
+    shareNotification.set(null);
+  }
 
   $: musicNavItems = [
     { id: "library", icon: "mdi:library-music", label: "Library", badge: 0 },
@@ -1231,6 +1254,27 @@
     <div class="text-center">
       <Icon icon="mdi:loading" class="w-12 h-12 text-[#1db954] mx-auto mb-4 animate-spin" />
       <p class="text-lg font-semibold">Importing files...</p>
+    </div>
+  </div>
+{/if}
+
+<!-- Share Notification - Above Playback Bar -->
+{#if $shareNotification && !$miniMode}
+  <div
+    class="fixed bottom-[118px] left-1/2 -translate-x-1/2 z-[60] w-full max-w-md px-4"
+    transition:fly={{ y: 20, duration: 200 }}
+  >
+    <div class="p-2.5 rounded-lg bg-[#1db954]/15 border border-[#1db954]/30 backdrop-blur-md flex items-center gap-3">
+      <Icon icon="mdi:upload" class="w-4 h-4 text-[#1db954] flex-shrink-0" />
+      <p class="text-xs text-white/90 flex-1 truncate">
+        <span class="text-[#1db954] font-medium">{$shareNotification.peerName}</span> downloaded <span class="text-white/70">{$shareNotification.songName}</span>
+      </p>
+      <button
+        class="text-white/40 hover:text-white transition-colors flex-shrink-0"
+        onclick={dismissShareNotification}
+      >
+        <Icon icon="mdi:close" class="w-3.5 h-3.5" />
+      </button>
     </div>
   </div>
 {/if}

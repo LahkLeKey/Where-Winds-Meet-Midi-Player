@@ -1,7 +1,8 @@
 <script>
   import Icon from "@iconify/svelte";
-  import { fade, fly } from "svelte/transition";
+  import { fade, fly, scale } from "svelte/transition";
   import { onMount } from "svelte";
+  import SearchSort from "./SearchSort.svelte";
   import {
     libraryEnabled,
     libraryConnected,
@@ -26,32 +27,129 @@
     startServer,
     stopServer,
     isHostingServer,
+    shareNotification,
   } from "../stores/library.js";
   import { midiFiles } from "../stores/player.js";
 
   let searchQuery = "";
+  let librarySortBy = "name-asc";
   let showSharePicker = false;
   let shareSearchQuery = "";
+
+  const librarySortOptions = [
+    { id: "name-asc", label: "A-Z", icon: "mdi:sort-alphabetical-ascending" },
+    { id: "name-desc", label: "Z-A", icon: "mdi:sort-alphabetical-descending" },
+    { id: "bpm-desc", label: "BPM ↓", icon: "mdi:music-note" },
+    { id: "bpm-asc", label: "BPM ↑", icon: "mdi:music-note-outline" },
+  ];
   let showDevSettings = false;
   let serverUrlInput = "";
   let serverPort = 3456;
   let showDownloadModal = false;
   let downloadingSong = null;
 
+  // Share picker state
+  let shareFilterMode = "all"; // "all", "selected", "unselected"
+  let shareSortBy = "name-asc"; // matches SearchSort format
+  let shareLetterFilter = ""; // "", "A", "B", etc. or "#" for numbers/symbols
+
+  const shareSortOptions = [
+    { id: "name-asc", label: "A-Z", icon: "mdi:sort-alphabetical-ascending" },
+    { id: "name-desc", label: "Z-A", icon: "mdi:sort-alphabetical-descending" },
+    { id: "bpm-desc", label: "BPM ↓", icon: "mdi:music-note" },
+    { id: "bpm-asc", label: "BPM ↑", icon: "mdi:music-note-outline" },
+  ];
+
   // Computed shared songs count
   $: sharedCount = $shareAll ? $midiFiles.length : $sharedSongs.length;
 
-  // Filtered songs for share picker
-  $: sharePickerSongs = $midiFiles.filter(f =>
-    f.name.toLowerCase().includes(shareSearchQuery.toLowerCase())
-  );
+  // Generate alphabet for quick jump
+  const alphabet = ["#", ..."ABCDEFGHIJKLMNOPQRSTUVWXYZ".split("")];
 
-  // Filter global songs by search
-  $: filteredSongs = searchQuery
-    ? $globalSongs.filter(song => song.name?.toLowerCase().includes(searchQuery.toLowerCase()))
-    : $globalSongs;
+  // Filtered and sorted songs for share picker
+  $: sharePickerSongs = (() => {
+    let songs = [...$midiFiles];
 
-  $: console.log('[UI] globalSongs:', $globalSongs.length, 'filteredSongs:', filteredSongs.length);
+    // Filter by search query
+    if (shareSearchQuery) {
+      const q = shareSearchQuery.toLowerCase();
+      songs = songs.filter(f => f.name.toLowerCase().includes(q));
+    }
+
+    // Filter by letter
+    if (shareLetterFilter) {
+      if (shareLetterFilter === "#") {
+        songs = songs.filter(f => !/^[a-zA-Z]/.test(f.name));
+      } else {
+        songs = songs.filter(f => f.name.toUpperCase().startsWith(shareLetterFilter));
+      }
+    }
+
+    // Filter by selection status
+    if (shareFilterMode === "selected") {
+      songs = songs.filter(f => $sharedSongs.includes(f.path));
+    } else if (shareFilterMode === "unselected") {
+      songs = songs.filter(f => !$sharedSongs.includes(f.path));
+    }
+
+    // Sort
+    switch (shareSortBy) {
+      case "name-asc":
+        songs.sort((a, b) => a.name.localeCompare(b.name));
+        break;
+      case "name-desc":
+        songs.sort((a, b) => b.name.localeCompare(a.name));
+        break;
+      case "bpm-desc":
+        songs.sort((a, b) => (b.bpm || 0) - (a.bpm || 0));
+        break;
+      case "bpm-asc":
+        songs.sort((a, b) => (a.bpm || 0) - (b.bpm || 0));
+        break;
+    }
+
+    return songs;
+  })();
+
+  // Count songs starting with each letter (for badge display)
+  $: letterCounts = (() => {
+    const counts = { "#": 0 };
+    alphabet.slice(1).forEach(l => counts[l] = 0);
+    $midiFiles.forEach(f => {
+      const first = f.name.charAt(0).toUpperCase();
+      if (/[A-Z]/.test(first)) {
+        counts[first]++;
+      } else {
+        counts["#"]++;
+      }
+    });
+    return counts;
+  })();
+
+  // Filter and sort global songs
+  $: filteredSongs = (() => {
+    let songs = searchQuery
+      ? $globalSongs.filter(song => song.name?.toLowerCase().includes(searchQuery.toLowerCase()))
+      : [...$globalSongs];
+
+    // Sort
+    switch (librarySortBy) {
+      case "name-asc":
+        songs.sort((a, b) => (a.name || '').localeCompare(b.name || ''));
+        break;
+      case "name-desc":
+        songs.sort((a, b) => (b.name || '').localeCompare(a.name || ''));
+        break;
+      case "bpm-desc":
+        songs.sort((a, b) => (b.bpm || 0) - (a.bpm || 0));
+        break;
+      case "bpm-asc":
+        songs.sort((a, b) => (a.bpm || 0) - (b.bpm || 0));
+        break;
+    }
+
+    return songs;
+  })();
 
   function toggleSongShare(path) {
     const current = $sharedSongs;
@@ -68,6 +166,28 @@
 
   function deselectAllSongs() {
     setSharedSongs([]);
+  }
+
+  // Select only currently visible/filtered songs
+  function selectVisibleSongs() {
+    const visiblePaths = new Set(sharePickerSongs.map(f => f.path));
+    const currentSelected = new Set($sharedSongs);
+    visiblePaths.forEach(p => currentSelected.add(p));
+    setSharedSongs([...currentSelected]);
+  }
+
+  // Deselect only currently visible/filtered songs
+  function deselectVisibleSongs() {
+    const visiblePaths = new Set(sharePickerSongs.map(f => f.path));
+    setSharedSongs($sharedSongs.filter(p => !visiblePaths.has(p)));
+  }
+
+  // Reset share picker filters
+  function resetShareFilters() {
+    shareSearchQuery = "";
+    shareLetterFilter = "";
+    shareFilterMode = "all";
+    shareSortBy = "name-asc";
   }
 
   // Scroll mask
@@ -127,11 +247,11 @@
   }
 </script>
 
-<div class="h-full flex flex-col min-h-0 -mx-1">
+<div class="h-full flex flex-col min-h-0 -mx-1 relative">
   <div
     bind:this={scrollContainer}
     onscroll={handleScroll}
-    class="flex-1 overflow-y-auto scrollbar-thin min-h-0 px-1 pb-2 {showTopMask && showBottomMask ? 'scroll-mask-both' : showTopMask ? 'scroll-mask-top' : showBottomMask ? 'scroll-mask-bottom' : ''}"
+    class="flex-1 overflow-y-auto scrollbar-thin min-h-0 px-1 {$downloadProgress || $libraryError ? 'pb-16' : 'pb-2'} {showTopMask && showBottomMask ? 'scroll-mask-both' : showTopMask ? 'scroll-mask-top' : showBottomMask ? 'scroll-mask-bottom' : ''}"
   >
     <!-- Header -->
     <div class="mb-4">
@@ -291,6 +411,17 @@
               <Icon icon="mdi:refresh" class="w-3 h-3" />
               Refresh
             </button>
+            {#if import.meta.env.DEV}
+              <!-- DEV: Test notification button -->
+              <button
+                class="text-xs text-orange-400/70 hover:text-orange-400 transition-colors flex items-center gap-1"
+                onclick={() => shareNotification.set({ songName: "Test Song.mid", peerName: "TestUser123", timestamp: Date.now() })}
+                title="[DEV] Test share notification"
+              >
+                <Icon icon="mdi:bell-ring" class="w-3 h-3" />
+                Test
+              </button>
+            {/if}
           </div>
 
           <!-- Sharing Options -->
@@ -398,94 +529,81 @@
           {/if}
         </div>
 
-        <!-- Download Progress (at top) -->
-        {#if $downloadProgress}
-          <div class="p-3 rounded-lg bg-[#1db954]/10 border border-[#1db954]/30 flex items-center gap-3" transition:fade>
-            <Icon icon="mdi:loading" class="w-5 h-5 text-[#1db954] animate-spin flex-shrink-0" />
-            <div class="flex-1 min-w-0">
-              <p class="text-sm font-medium text-white truncate">{$downloadProgress.songName}</p>
-              <p class="text-xs text-[#1db954]">{$downloadProgress.status}</p>
-            </div>
-            <div class="w-12 text-right">
-              <span class="text-xs text-[#1db954] font-medium">{$downloadProgress.progress}%</span>
-            </div>
-          </div>
-        {/if}
-
-        <!-- Error Display (at top) -->
-        {#if $libraryError}
-          <div class="p-3 rounded-lg bg-red-500/10 border border-red-500/30 flex items-center gap-2" transition:fade>
-            <Icon icon="mdi:alert-circle" class="w-4 h-4 text-red-400 flex-shrink-0" />
-            <p class="text-xs text-red-400 flex-1">{$libraryError}</p>
-            <button
-              class="text-xs text-red-400 hover:text-red-300"
-              onclick={() => libraryError.set(null)}
-            >
-              Dismiss
-            </button>
-          </div>
-        {/if}
-
-        <!-- Search -->
+        <!-- Search & Sort -->
         {#if $globalSongs.length > 0}
-          <div class="relative">
-            <Icon icon="mdi:magnify" class="absolute left-3 top-1/2 -translate-y-1/2 text-white/40 w-4 h-4" />
-            <input
-              type="text"
-              placeholder="Search {$globalSongs.length} available songs..."
-              bind:value={searchQuery}
-              class="w-full bg-white/5 border border-white/10 rounded-lg pl-9 pr-3 py-2 text-sm text-white placeholder-white/30 focus:outline-none focus:ring-1 focus:ring-[#1db954]"
-            />
-          </div>
+          <SearchSort
+            bind:searchQuery={searchQuery}
+            bind:sortBy={librarySortBy}
+            placeholder="Search {$globalSongs.length} available songs..."
+            sortOptions={librarySortOptions}
+          />
         {/if}
 
         <!-- Song List -->
         {#if filteredSongs.length > 0}
-          <div class="space-y-1">
+          <div class="space-y-1.5">
             {#each filteredSongs as song, i (song.hash + song.peerId + i)}
               {@const hasIt = ownedHashes.has(song.hash)}
-              <div
-                class="group flex items-center gap-3 p-2 rounded-lg hover:bg-white/5 transition-colors"
-                in:fly={{ y: 10, duration: 150 }}
+              {@const isDownloading = $downloadProgress?.songName === song.name}
+              <button
+                class="w-full flex items-center gap-3 p-2.5 rounded-xl transition-all text-left
+                  {hasIt
+                    ? 'bg-[#1db954]/5 border border-[#1db954]/20 cursor-default'
+                    : isDownloading
+                      ? 'bg-[#1db954]/10 border border-[#1db954]/30'
+                      : 'bg-white/5 border border-transparent hover:bg-white/10 hover:border-white/10 active:scale-[0.98]'
+                  }"
+                onclick={() => !hasIt && !isDownloading && openDownloadModal(song)}
+                disabled={hasIt || isDownloading}
+                in:fly={{ y: 10, duration: 150, delay: i * 20 }}
               >
-                <!-- Song Icon -->
-                <div class="w-8 h-8 rounded bg-white/10 flex items-center justify-center flex-shrink-0">
-                  <Icon icon="mdi:music-note" class="w-4 h-4 text-white/50" />
+                <!-- Song Icon with Status -->
+                <div class="w-10 h-10 rounded-lg flex items-center justify-center flex-shrink-0 relative
+                  {hasIt ? 'bg-[#1db954]/20' : isDownloading ? 'bg-[#1db954]/20' : 'bg-white/10'}">
+                  {#if hasIt}
+                    <Icon icon="mdi:check-circle" class="w-5 h-5 text-[#1db954]" />
+                  {:else if isDownloading}
+                    <Icon icon="mdi:loading" class="w-5 h-5 text-[#1db954] animate-spin" />
+                  {:else}
+                    <Icon icon="mdi:music-note" class="w-5 h-5 text-white/50" />
+                  {/if}
                 </div>
 
                 <!-- Song Info -->
                 <div class="flex-1 min-w-0">
-                  <p class="text-sm font-medium truncate {hasIt ? 'text-white/50' : 'text-white'}">
+                  <p class="text-sm font-medium truncate {hasIt ? 'text-[#1db954]' : 'text-white'}">
                     {song.name}
                   </p>
-                  <p class="text-xs text-white/40">
-                    {song.peerName} &bull; {song.bpm || '?'} BPM &bull; {formatDuration(song.duration)}
-                  </p>
+                  <div class="flex items-center gap-2 text-xs text-white/40">
+                    <span class="flex items-center gap-1">
+                      <Icon icon="mdi:account" class="w-3 h-3" />
+                      {song.peerName}
+                    </span>
+                    <span>•</span>
+                    <span>{song.bpm || '?'} BPM</span>
+                    <span>•</span>
+                    <span>{formatDuration(song.duration)}</span>
+                  </div>
                 </div>
 
-                <!-- Download Button -->
-                <div class="flex-shrink-0">
+                <!-- Action Area -->
+                <div class="flex-shrink-0 flex items-center">
                   {#if hasIt}
-                    <span class="text-xs text-[#1db954] flex items-center gap-1">
-                      <Icon icon="mdi:check" class="w-4 h-4" />
+                    <span class="text-xs text-[#1db954] font-medium px-2 py-1 rounded-full bg-[#1db954]/10">
                       Owned
                     </span>
-                  {:else if $downloadProgress?.songName === song.name}
-                    <div class="flex items-center gap-2">
-                      <Icon icon="mdi:loading" class="w-4 h-4 text-[#1db954] animate-spin" />
-                      <span class="text-xs text-white/50">{$downloadProgress.status}</span>
+                  {:else if isDownloading}
+                    <div class="flex items-center gap-2 px-2 py-1 rounded-full bg-[#1db954]/10">
+                      <span class="text-xs text-[#1db954] font-medium">{$downloadProgress.progress}%</span>
                     </div>
                   {:else}
-                    <button
-                      class="p-1.5 rounded-full text-white/30 hover:text-[#1db954] hover:bg-white/10 transition-all opacity-0 group-hover:opacity-100"
-                      onclick={() => openDownloadModal(song)}
-                      title="Download"
-                    >
-                      <Icon icon="mdi:download" class="w-5 h-5" />
-                    </button>
+                    <div class="flex items-center gap-1 px-3 py-1.5 rounded-full bg-[#1db954] text-white text-xs font-medium">
+                      <Icon icon="mdi:download" class="w-4 h-4" />
+                      <span>Get</span>
+                    </div>
                   {/if}
                 </div>
-              </div>
+              </button>
             {/each}
           </div>
         {:else if $globalSongs.length === 0}
@@ -503,101 +621,230 @@
       </div>
     {/if}
   </div>
-</div>
 
-<!-- Share Picker Modal -->
-{#if showSharePicker}
-  <div class="fixed inset-0 z-50 flex items-center justify-center" transition:fade={{ duration: 150 }}>
-    <button
-      class="absolute inset-0 bg-black/60"
-      onclick={() => { showSharePicker = false; shareSearchQuery = ""; }}
-    ></button>
-
+  <!-- Floating Bottom Bar for Download Progress & Errors -->
+  {#if $downloadProgress || $libraryError}
     <div
-      class="relative bg-[#282828] rounded-xl shadow-2xl w-[400px] max-w-[90vw] max-h-[80vh] overflow-hidden flex flex-col"
+      class="absolute bottom-0 left-0 right-0 px-1 pb-2 bg-gradient-to-t from-[#121212] via-[#121212]/95 to-transparent pt-6"
       transition:fly={{ y: 20, duration: 200 }}
     >
-      <!-- Header -->
-      <div class="flex items-center justify-between p-4 border-b border-white/10">
-        <div>
-          <h3 class="text-lg font-bold">Select Songs to Share</h3>
-          <p class="text-xs text-white/50">{$sharedSongs.length} of {$midiFiles.length} selected</p>
-        </div>
-        <button
-          class="p-1 rounded-full hover:bg-white/10 text-white/60 hover:text-white transition-colors"
-          onclick={() => { showSharePicker = false; shareSearchQuery = ""; }}
-        >
-          <Icon icon="mdi:close" class="w-5 h-5" />
-        </button>
-      </div>
-
-      <!-- Search & Actions -->
-      <div class="p-3 border-b border-white/10 space-y-2">
-        <div class="relative">
-          <Icon icon="mdi:magnify" class="absolute left-3 top-1/2 -translate-y-1/2 text-white/40 w-4 h-4" />
-          <input
-            type="text"
-            placeholder="Search songs..."
-            bind:value={shareSearchQuery}
-            class="w-full bg-white/5 border border-white/10 rounded-lg pl-9 pr-3 py-2 text-sm text-white placeholder-white/30 focus:outline-none focus:ring-1 focus:ring-[#1db954]"
-          />
-        </div>
-        <div class="flex gap-2">
-          <button
-            class="flex-1 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-white/70 hover:text-white transition-colors"
-            onclick={selectAllSongs}
-          >
-            Select All
-          </button>
-          <button
-            class="flex-1 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-white/70 hover:text-white transition-colors"
-            onclick={deselectAllSongs}
-          >
-            Deselect All
-          </button>
-        </div>
-      </div>
-
-      <!-- Song List -->
-      <div class="flex-1 overflow-y-auto p-2 space-y-1">
-        {#each sharePickerSongs as file (file.path)}
-          {@const isSelected = $sharedSongs.includes(file.path)}
-          <button
-            class="w-full flex items-center gap-3 p-2 rounded-lg transition-colors {isSelected ? 'bg-[#1db954]/20' : 'hover:bg-white/5'}"
-            onclick={() => toggleSongShare(file.path)}
-          >
-            <!-- Checkbox -->
-            <div class="w-5 h-5 rounded border-2 flex items-center justify-center flex-shrink-0 transition-colors {isSelected ? 'bg-[#1db954] border-[#1db954]' : 'border-white/30'}">
-              {#if isSelected}
-                <Icon icon="mdi:check" class="w-3.5 h-3.5 text-white" />
-              {/if}
+      <div class="space-y-2">
+        <!-- Download Progress -->
+        {#if $downloadProgress}
+          <div class="p-3 rounded-lg bg-[#1db954]/10 border border-[#1db954]/30 flex items-center gap-3 backdrop-blur-sm" transition:fade>
+            <Icon icon="mdi:loading" class="w-5 h-5 text-[#1db954] animate-spin flex-shrink-0" />
+            <div class="flex-1 min-w-0">
+              <p class="text-sm font-medium text-white truncate">{$downloadProgress.songName}</p>
+              <p class="text-xs text-[#1db954]">{$downloadProgress.status}</p>
             </div>
-
-            <!-- Song Info -->
-            <div class="flex-1 min-w-0 text-left">
-              <p class="text-sm font-medium truncate {isSelected ? 'text-[#1db954]' : 'text-white'}">{file.name}</p>
-              <p class="text-xs text-white/40">{file.bpm || '?'} BPM</p>
+            <div class="w-12 text-right">
+              <span class="text-xs text-[#1db954] font-medium">{$downloadProgress.progress}%</span>
             </div>
-          </button>
-        {/each}
+          </div>
+        {/if}
 
-        {#if sharePickerSongs.length === 0}
-          <div class="text-center py-8 text-white/40">
-            <Icon icon="mdi:music-note-off" class="w-8 h-8 mx-auto mb-2 opacity-50" />
-            <p class="text-sm">No songs found</p>
+        <!-- Error Display -->
+        {#if $libraryError}
+          <div class="p-3 rounded-lg bg-red-500/10 border border-red-500/30 flex items-center gap-2 backdrop-blur-sm" transition:fade>
+            <Icon icon="mdi:alert-circle" class="w-4 h-4 text-red-400 flex-shrink-0" />
+            <p class="text-xs text-red-400 flex-1">{$libraryError}</p>
+            <button
+              class="text-xs text-red-400 hover:text-red-300 px-2 py-1 rounded hover:bg-red-500/10 transition-colors"
+              onclick={() => libraryError.set(null)}
+            >
+              Dismiss
+            </button>
           </div>
         {/if}
       </div>
+    </div>
+  {/if}
+</div>
 
-      <!-- Footer -->
-      <div class="p-3 border-t border-white/10">
+<!-- Share Picker Modal - Full Screen with padding -->
+{#if showSharePicker}
+  <div class="fixed inset-0 z-50 p-2 overflow-hidden rounded-md" transition:fade={{ duration: 150 }}>
+    <div class="absolute inset-0 bg-black/80 rounded-md"></div>
+    <div
+      class="relative w-full h-full bg-[#181818] rounded-lg flex flex-col overflow-hidden shadow-2xl"
+      style="transform-origin: center center;"
+      in:scale={{ duration: 200, start: 0.95, opacity: 0 }}
+      out:scale={{ duration: 150, start: 0.95, opacity: 0 }}
+    >
+    <!-- Top Bar -->
+    <div class="flex items-center justify-between px-4 py-3 border-b border-white/10 bg-[#181818]">
+      <div class="flex items-center gap-4">
         <button
-          class="w-full py-2 rounded-lg bg-[#1db954] hover:bg-[#1ed760] text-white font-medium text-sm transition-colors"
-          onclick={() => { showSharePicker = false; shareSearchQuery = ""; }}
+          class="p-2 rounded-lg hover:bg-white/10 text-white/60 hover:text-white transition-colors"
+          onclick={() => { showSharePicker = false; resetShareFilters(); }}
         >
-          Done
+          <Icon icon="mdi:arrow-left" class="w-5 h-5" />
         </button>
+        <div>
+          <h2 class="text-lg font-bold">Select Songs to Share</h2>
+          <p class="text-xs text-white/50">
+            <span class="text-[#1db954] font-semibold">{$sharedSongs.length.toLocaleString()}</span> of {$midiFiles.length.toLocaleString()} selected
+            {#if sharePickerSongs.length !== $midiFiles.length}
+              <span class="text-white/30 ml-2">• Showing {sharePickerSongs.length.toLocaleString()}</span>
+            {/if}
+          </p>
+        </div>
       </div>
+
+      <!-- Done Button -->
+      <button
+        class="px-5 py-2 rounded-full bg-[#1db954] hover:bg-[#1ed760] text-white font-semibold text-sm transition-colors flex items-center gap-2"
+        onclick={() => { showSharePicker = false; resetShareFilters(); }}
+      >
+        <Icon icon="mdi:check" class="w-4 h-4" />
+        Done
+      </button>
+    </div>
+
+    <!-- Main Content -->
+    <div class="flex-1 flex min-h-0">
+      <!-- Left Sidebar - Alphabet -->
+      <div class="w-12 bg-[#181818] border-r border-white/5 flex flex-col py-2 overflow-y-auto scrollbar-none">
+        <button
+          class="w-full py-1.5 text-[10px] font-bold transition-all {shareLetterFilter === '' ? 'text-[#1db954] bg-[#1db954]/10' : 'text-white/40 hover:text-white hover:bg-white/5'}"
+          onclick={() => shareLetterFilter = ''}
+        >
+          ALL
+        </button>
+        {#each alphabet as letter}
+          {@const count = letterCounts[letter] || 0}
+          <button
+            class="w-full py-1 text-[11px] font-medium transition-all
+              {shareLetterFilter === letter ? 'text-[#1db954] bg-[#1db954]/10' : count > 0 ? 'text-white/40 hover:text-white hover:bg-white/5' : 'text-white/15'}"
+            onclick={() => count > 0 && (shareLetterFilter = letter)}
+            disabled={count === 0}
+            title="{count} songs"
+          >
+            {letter}
+          </button>
+        {/each}
+      </div>
+
+      <!-- Main Area -->
+      <div class="flex-1 flex flex-col min-w-0">
+        <!-- Toolbar -->
+        <div class="px-4 py-3 border-b border-white/5 space-y-3">
+          <!-- Search + Sort Row -->
+          <SearchSort
+            bind:searchQuery={shareSearchQuery}
+            bind:sortBy={shareSortBy}
+            placeholder="Search songs..."
+            sortOptions={shareSortOptions}
+          />
+
+          <!-- Filter Tabs + Actions Row -->
+          <div class="flex items-center gap-2">
+            <!-- Filter Tabs -->
+            <div class="flex gap-1 p-1 bg-white/5 rounded-lg">
+              <button
+                class="px-3 py-1.5 rounded-md text-xs font-medium transition-all {shareFilterMode === 'all' ? 'bg-white/15 text-white' : 'text-white/50 hover:text-white'}"
+                onclick={() => shareFilterMode = 'all'}
+              >
+                All
+              </button>
+              <button
+                class="px-3 py-1.5 rounded-md text-xs font-medium transition-all {shareFilterMode === 'selected' ? 'bg-[#1db954]/30 text-[#1db954]' : 'text-white/50 hover:text-white'}"
+                onclick={() => shareFilterMode = 'selected'}
+              >
+                Selected ({$sharedSongs.length})
+              </button>
+              <button
+                class="px-3 py-1.5 rounded-md text-xs font-medium transition-all {shareFilterMode === 'unselected' ? 'bg-orange-500/30 text-orange-400' : 'text-white/50 hover:text-white'}"
+                onclick={() => shareFilterMode = 'unselected'}
+              >
+                Unselected
+              </button>
+            </div>
+
+            <div class="flex-1"></div>
+
+            <!-- Batch Actions -->
+            <button
+              class="px-3 py-1.5 rounded-lg bg-[#1db954]/10 hover:bg-[#1db954]/20 text-xs text-[#1db954] font-medium transition-colors flex items-center gap-1.5"
+              onclick={selectVisibleSongs}
+            >
+              <Icon icon="mdi:check-all" class="w-4 h-4" />
+              Select Shown
+            </button>
+            <button
+              class="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-white/60 hover:text-white font-medium transition-colors flex items-center gap-1.5"
+              onclick={deselectVisibleSongs}
+            >
+              <Icon icon="mdi:close" class="w-4 h-4" />
+              Deselect Shown
+            </button>
+            <button
+              class="px-3 py-1.5 rounded-lg bg-[#1db954]/10 hover:bg-[#1db954]/20 text-xs text-[#1db954] font-medium transition-colors"
+              onclick={selectAllSongs}
+            >
+              All {$midiFiles.length.toLocaleString()}
+            </button>
+            <button
+              class="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-xs text-white/60 hover:text-white font-medium transition-colors"
+              onclick={deselectAllSongs}
+            >
+              None
+            </button>
+            {#if shareSearchQuery || shareLetterFilter || shareFilterMode !== 'all'}
+              <button
+                class="px-3 py-1.5 rounded-lg bg-orange-500/10 hover:bg-orange-500/20 text-xs text-orange-400 font-medium transition-colors flex items-center gap-1"
+                onclick={resetShareFilters}
+              >
+                <Icon icon="mdi:filter-off" class="w-4 h-4" />
+                Clear
+              </button>
+            {/if}
+          </div>
+        </div>
+
+        <!-- Song Grid -->
+        <div class="flex-1 overflow-y-auto p-4 scrollbar-thin">
+          {#if sharePickerSongs.length === 0}
+            <div class="flex flex-col items-center justify-center h-full text-white/40">
+              <Icon icon="mdi:music-note-off" class="w-16 h-16 mb-4 opacity-50" />
+              <p class="text-lg font-medium mb-1">No songs found</p>
+              <p class="text-sm text-white/30 mb-4">Try adjusting your filters</p>
+              <button
+                class="px-4 py-2 rounded-lg bg-white/10 hover:bg-white/15 text-sm text-white transition-colors"
+                onclick={resetShareFilters}
+              >
+                Clear All Filters
+              </button>
+            </div>
+          {:else}
+            <div class="grid grid-cols-3 gap-2">
+              {#each sharePickerSongs as file (file.path)}
+                {@const isSelected = $sharedSongs.includes(file.path)}
+                <button
+                  class="flex items-center gap-3 p-3 rounded-lg transition-all text-left
+                    {isSelected
+                      ? 'bg-[#1db954]/20 ring-1 ring-[#1db954]/50'
+                      : 'bg-white/5 hover:bg-white/10'
+                    }"
+                  onclick={() => toggleSongShare(file.path)}
+                >
+                  <div class="w-5 h-5 rounded flex items-center justify-center flex-shrink-0
+                    {isSelected ? 'bg-[#1db954]' : 'bg-white/10 ring-1 ring-white/20'}">
+                    {#if isSelected}
+                      <Icon icon="mdi:check" class="w-3.5 h-3.5 text-white" />
+                    {/if}
+                  </div>
+                  <div class="flex-1 min-w-0">
+                    <p class="text-sm font-medium truncate {isSelected ? 'text-[#1db954]' : 'text-white'}">{file.name}</p>
+                    <p class="text-xs text-white/40">{file.bpm || '?'} BPM</p>
+                  </div>
+                </button>
+              {/each}
+            </div>
+          {/if}
+        </div>
+      </div>
+    </div>
     </div>
   </div>
 {/if}
@@ -609,34 +856,59 @@
     transition:fade={{ duration: 150 }}
   >
     <button
-      class="absolute inset-0 bg-black/60"
+      class="absolute inset-0 bg-black/60 backdrop-blur-sm"
       onclick={() => { showDownloadModal = false; downloadingSong = null; }}
     ></button>
 
     <div
-      class="relative bg-[#282828] rounded-xl shadow-2xl w-[360px] max-w-[90vw] overflow-hidden"
+      class="relative bg-[#282828] rounded-2xl shadow-2xl w-[380px] max-w-[90vw] overflow-hidden"
       transition:fly={{ y: 20, duration: 200 }}
     >
-      <div class="p-4 text-center">
-        <div class="w-12 h-12 rounded-full bg-[#1db954]/20 flex items-center justify-center mx-auto mb-3">
-          <Icon icon="mdi:download" class="w-6 h-6 text-[#1db954]" />
+      <!-- Song Preview Card -->
+      <div class="p-5">
+        <div class="flex items-start gap-4">
+          <div class="w-14 h-14 rounded-xl bg-gradient-to-br from-[#1db954]/30 to-[#1db954]/10 flex items-center justify-center flex-shrink-0">
+            <Icon icon="mdi:music-note" class="w-7 h-7 text-[#1db954]" />
+          </div>
+          <div class="flex-1 min-w-0">
+            <h3 class="text-base font-bold truncate mb-1">{downloadingSong.name}</h3>
+            <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-white/50">
+              <span class="flex items-center gap-1">
+                <Icon icon="mdi:account" class="w-3.5 h-3.5" />
+                {downloadingSong.peerName}
+              </span>
+              {#if downloadingSong.bpm}
+                <span>{downloadingSong.bpm} BPM</span>
+              {/if}
+              {#if downloadingSong.duration}
+                <span>{formatDuration(downloadingSong.duration)}</span>
+              {/if}
+            </div>
+          </div>
         </div>
-        <h3 class="text-lg font-bold mb-2">Download Song?</h3>
-        <p class="text-sm text-white/60 mb-1">"{downloadingSong.name}"</p>
-        <p class="text-xs text-white/40">from {downloadingSong.peerName}</p>
+
+        <!-- Security Note -->
+        <div class="mt-4 p-3 rounded-lg bg-white/5 flex items-start gap-2">
+          <Icon icon="mdi:shield-check" class="w-4 h-4 text-[#1db954] flex-shrink-0 mt-0.5" />
+          <p class="text-xs text-white/50">
+            File will be verified as a valid MIDI before saving to your library.
+          </p>
+        </div>
       </div>
 
+      <!-- Actions -->
       <div class="flex gap-2 p-4 pt-0">
         <button
-          class="flex-1 py-2 rounded-lg bg-white/10 hover:bg-white/20 text-white font-medium text-sm transition-colors"
+          class="flex-1 py-2.5 rounded-xl bg-white/10 hover:bg-white/15 text-white font-medium text-sm transition-colors"
           onclick={() => { showDownloadModal = false; downloadingSong = null; }}
         >
           Cancel
         </button>
         <button
-          class="flex-1 py-2 rounded-lg bg-[#1db954] hover:bg-[#1ed760] text-white font-medium text-sm transition-colors"
+          class="flex-1 py-2.5 rounded-xl bg-[#1db954] hover:bg-[#1ed760] text-white font-medium text-sm transition-colors flex items-center justify-center gap-2"
           onclick={confirmDownload}
         >
+          <Icon icon="mdi:download" class="w-4 h-4" />
           Download
         </button>
       </div>
