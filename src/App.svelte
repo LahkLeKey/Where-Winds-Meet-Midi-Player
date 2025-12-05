@@ -175,6 +175,7 @@
   import SavedPlaylistsView from "./lib/components/SavedPlaylistsView.svelte";
   import SettingsView from "./lib/components/SettingsView.svelte";
   import StatsView from "./lib/components/StatsView.svelte";
+  import LivePlayView from "./lib/components/LivePlayView.svelte";
   import Visualizer from "./lib/components/Visualizer.svelte";
   import BandMode from "./lib/components/BandMode.svelte";
   import LibraryShare from "./lib/components/LibraryShare.svelte";
@@ -348,6 +349,7 @@
   ];
 
   $: appNavItems = [
+    { id: "live", icon: "mdi:piano", label: "Live Play", badge: 0 },
     { id: "settings", icon: "mdi:cog", label: "Settings", badge: 0 },
     { id: "stats", icon: "mdi:chart-bar", label: "Stats", badge: 0 },
   ];
@@ -762,6 +764,8 @@
                     <StatsView />
                   {:else if activeView === "settings"}
                     <SettingsView />
+                  {:else if activeView === "live"}
+                    <LivePlayView />
                   {/if}
                 </div>
               {/key}

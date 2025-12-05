@@ -5,6 +5,7 @@ use tauri::Window;
 use serde::{Serialize, Deserialize};
 
 use crate::midi::{NoteMode, KeyMode, EventType, BandFilter};
+use crate::midi_input::{MidiInputState, MidiConnectionState};
 
 /// Note event for visualizer (simplified for frontend)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,6 +46,10 @@ pub struct AppState {
     seek_offset: Arc<std::sync::Mutex<f64>>,
     // Band mode filter
     band_filter: Arc<std::sync::Mutex<Option<BandFilter>>>,
+    // Live MIDI input state
+    pub midi_input_state: Arc<std::sync::Mutex<MidiInputState>>,
+    pub is_live_mode_active: Arc<AtomicBool>,
+    pub live_transpose: Arc<AtomicI8>,  // Separate transpose for live mode
 }
 
 impl AppState {
@@ -64,7 +69,40 @@ impl AppState {
             midi_data: Arc::new(std::sync::Mutex::new(None)),
             seek_offset: Arc::new(std::sync::Mutex::new(0.0)),
             band_filter: Arc::new(std::sync::Mutex::new(None)),
+            // Live MIDI input
+            midi_input_state: Arc::new(std::sync::Mutex::new(MidiInputState::new())),
+            is_live_mode_active: Arc::new(AtomicBool::new(false)),
+            live_transpose: Arc::new(AtomicI8::new(0)),
         }
+    }
+
+    // Live MIDI input getters
+    pub fn get_midi_input_state(&self) -> Arc<std::sync::Mutex<MidiInputState>> {
+        Arc::clone(&self.midi_input_state)
+    }
+
+    pub fn get_is_live_mode_active(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.is_live_mode_active)
+    }
+
+    pub fn get_note_mode_arc(&self) -> Arc<AtomicU8> {
+        Arc::clone(&self.note_mode)
+    }
+
+    pub fn get_key_mode_arc(&self) -> Arc<AtomicU8> {
+        Arc::clone(&self.key_mode)
+    }
+
+    pub fn get_octave_shift_arc(&self) -> Arc<AtomicI8> {
+        Arc::clone(&self.octave_shift)
+    }
+
+    pub fn get_live_transpose(&self) -> Arc<AtomicI8> {
+        Arc::clone(&self.live_transpose)
+    }
+
+    pub fn set_live_transpose(&self, value: i8) {
+        self.live_transpose.store(value.clamp(-12, 12), Ordering::SeqCst);
     }
 
     pub fn set_band_filter(&mut self, mode: String, slot: usize, total_players: usize, track_id: Option<usize>) {

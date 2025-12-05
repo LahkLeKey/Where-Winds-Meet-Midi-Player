@@ -310,6 +310,7 @@ mod midi;
 mod keyboard;
 mod state;
 mod discovery;
+mod midi_input;
 
 use state::{AppState, PlaybackState, VisualizerNote};
 
@@ -1026,6 +1027,15 @@ async fn cmd_unfocus_window() -> Result<(), String> {
 
 #[tauri::command]
 async fn press_key(key: String) -> Result<(), String> {
+    keyboard::key_down(&key);
+    keyboard::key_up(&key);
+    Ok(())
+}
+
+/// Tap a key directly - same as test_all_keys_36
+/// Supports modifier keys: "shift+z", "ctrl+c", etc.
+#[tauri::command]
+async fn tap_key(key: String) -> Result<(), String> {
     keyboard::key_down(&key);
     keyboard::key_up(&key);
     Ok(())
@@ -2824,6 +2834,164 @@ fn set_high_priority() {
     }
 }
 
+// ============================================================================
+// Live MIDI Input Commands
+// ============================================================================
+
+use midi_input::{MidiConnectionState, LiveNoteEvent};
+
+/// List available MIDI input devices
+#[tauri::command]
+async fn list_midi_input_devices(
+    state: State<'_, Arc<Mutex<AppState>>>
+) -> Result<Vec<String>, String> {
+    let app_state = state.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let midi_state = app_state.get_midi_input_state();
+    let mut midi_state_guard = midi_state.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(midi_input::list_midi_devices(&mut midi_state_guard))
+}
+
+/// Get current MIDI connection state
+#[tauri::command]
+async fn get_midi_connection_state(
+    state: State<'_, Arc<Mutex<AppState>>>
+) -> Result<MidiConnectionState, String> {
+    let app_state = state.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let midi_state = app_state.get_midi_input_state();
+    let midi_state_guard = midi_state.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(midi_state_guard.get_state())
+}
+
+/// Start listening to a MIDI device
+#[tauri::command]
+async fn start_midi_listening(
+    device_index: usize,
+    state: State<'_, Arc<Mutex<AppState>>>,
+    app_handle: AppHandle
+) -> Result<String, String> {
+    // First stop any file playback (exclusive mode)
+    {
+        let mut app_state = state.lock().map_err(|e| format!("Lock error: {}", e))?;
+        if app_state.get_playback_state().is_playing {
+            app_state.stop_playback();
+        }
+    }
+
+    let app_state = state.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let midi_state = app_state.get_midi_input_state();
+    let note_mode = app_state.get_note_mode_arc();
+    let key_mode = app_state.get_key_mode_arc();
+    let octave_shift = app_state.get_octave_shift_arc();
+    let live_transpose = app_state.get_live_transpose();
+    let is_listening = app_state.get_is_live_mode_active();
+
+    midi_input::start_listening(
+        midi_state,
+        device_index,
+        app_handle,
+        note_mode,
+        key_mode,
+        octave_shift,
+        live_transpose,
+        is_listening,
+    )
+}
+
+/// Stop listening to MIDI device
+#[tauri::command]
+async fn stop_midi_listening(
+    state: State<'_, Arc<Mutex<AppState>>>,
+    app_handle: AppHandle
+) -> Result<(), String> {
+    let app_state = state.lock().map_err(|e| format!("Lock error: {}", e))?;
+    let midi_state = app_state.get_midi_input_state();
+    let is_listening = app_state.get_is_live_mode_active();
+
+    midi_input::stop_listening(midi_state, is_listening, &app_handle)
+}
+
+/// Check if live mode is active
+#[tauri::command]
+async fn is_live_mode_active(
+    state: State<'_, Arc<Mutex<AppState>>>
+) -> Result<bool, String> {
+    let app_state = state.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(app_state.is_live_mode_active.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+/// Set live mode transpose
+#[tauri::command]
+async fn set_live_transpose(
+    value: i8,
+    state: State<'_, Arc<Mutex<AppState>>>
+) -> Result<(), String> {
+    let app_state = state.lock().map_err(|e| format!("Lock error: {}", e))?;
+    app_state.set_live_transpose(value);
+    Ok(())
+}
+
+/// Get live mode transpose
+#[tauri::command]
+async fn get_live_transpose(
+    state: State<'_, Arc<Mutex<AppState>>>
+) -> Result<i8, String> {
+    let app_state = state.lock().map_err(|e| format!("Lock error: {}", e))?;
+    Ok(app_state.live_transpose.load(std::sync::atomic::Ordering::SeqCst))
+}
+
+/// DEV: Simulate a MIDI note press (for testing without hardware)
+#[tauri::command]
+async fn simulate_midi_note(
+    midi_note: u8,
+    state: State<'_, Arc<Mutex<AppState>>>,
+    app_handle: AppHandle,
+) -> Result<midi_input::LiveNoteEvent, String> {
+    use std::sync::atomic::Ordering;
+
+    let app_state = state.lock().map_err(|e| format!("Lock error: {}", e))?;
+
+    // Get current settings
+    let note_mode = midi::NoteMode::from(app_state.get_note_mode_arc().load(Ordering::SeqCst));
+    let key_mode = midi::KeyMode::from(app_state.get_key_mode_arc().load(Ordering::SeqCst));
+    let octave_shift = app_state.get_octave_shift_arc().load(Ordering::SeqCst);
+    let live_transpose = app_state.live_transpose.load(Ordering::SeqCst);
+
+    // Calculate total transpose
+    let total_transpose = (octave_shift as i32 * 12) + (live_transpose as i32);
+
+    // Map note to key
+    let key = midi_input::map_note_to_key(midi_note as i32, total_transpose, note_mode, key_mode);
+
+    // Get note name
+    let note_names = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    let note_name = format!("{}{}", note_names[(midi_note % 12) as usize], (midi_note / 12) as i32 - 1);
+
+    // Create event for frontend
+    let event = midi_input::LiveNoteEvent {
+        midi_note,
+        key: key.clone(),
+        note_name: note_name.clone(),
+        velocity: 100,
+    };
+
+    // Emit to frontend
+    let _ = app_handle.emit("live-note", &event);
+
+    // Actually press the key (instant tap like MIDI playback)
+    keyboard::key_down(&key);
+
+    // Release in background thread (non-blocking, same as live MIDI input)
+    std::thread::spawn({
+        let key = key.clone();
+        move || {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            keyboard::key_up(&key);
+        }
+    });
+
+    Ok(event)
+}
+
 fn main() {
     // Initialize logging first
     init_logger();
@@ -2882,6 +3050,7 @@ fn main() {
             cmd_set_keybindings_enabled,
             cmd_unfocus_window,
             press_key,
+            tap_key,
             is_game_focused,
             is_game_window_found,
             test_all_keys,
@@ -2926,6 +3095,15 @@ fn main() {
             export_playlist,
             export_library,
             import_zip,
+            // Live MIDI input
+            list_midi_input_devices,
+            get_midi_connection_state,
+            start_midi_listening,
+            stop_midi_listening,
+            is_live_mode_active,
+            set_live_transpose,
+            get_live_transpose,
+            simulate_midi_note,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

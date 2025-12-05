@@ -67,6 +67,16 @@ export const smartPause = writable(false);
 // Keybinding recording mode (prevents App.svelte from handling keys)
 export const recordingKeybind = writable(false);
 
+// ============ Live MIDI Input State ============
+export const midiInputDevices = writable([]);
+export const selectedMidiDevice = writable(null);
+export const selectedMidiDeviceIndex = writable(null); // Persisted device selection
+export const isLiveModeActive = writable(false);
+export const isDevVirtualConnected = writable(false); // DEV virtual MIDI keyboard connection state
+export const midiConnectionState = writable('NoDevices'); // NoDevices, DevicesAvailable, Connecting, Connected, Listening, Disconnected, Error
+export const liveTranspose = writable(0);
+export const lastLiveNote = writable(null); // { midiNote, key, noteName, velocity }
+
 // Store previous window size/position for restore
 let previousWindowState = null;
 
@@ -1374,4 +1384,120 @@ async function refreshPlaybackState() {
   } catch (error) {
     console.error('Failed to refresh playback status:', error);
   }
+}
+
+// ============ Live MIDI Input Functions ============
+
+// Refresh list of available MIDI input devices
+export async function refreshMidiDevices() {
+  try {
+    const devices = await invoke('list_midi_input_devices');
+    midiInputDevices.set(devices);
+    // Only update connection state if not already connected
+    const currentState = get(midiConnectionState);
+    const isVirtualConnected = get(isDevVirtualConnected);
+    if (currentState !== 'Connected' && !isVirtualConnected) {
+      midiConnectionState.set(devices.length > 0 ? 'DevicesAvailable' : 'NoDevices');
+    }
+    return devices;
+  } catch (error) {
+    console.error('Failed to list MIDI devices:', error);
+    midiInputDevices.set([]);
+    // Only set error if not connected
+    const currentState = get(midiConnectionState);
+    if (currentState !== 'Connected') {
+      midiConnectionState.set('Error');
+    }
+    return [];
+  }
+}
+
+// Start listening to a MIDI device
+export async function startMidiListening(deviceIndex) {
+  try {
+    midiConnectionState.set('Connecting');
+    const deviceName = await invoke('start_midi_listening', { deviceIndex });
+    selectedMidiDevice.set({ index: deviceIndex, name: deviceName });
+    isLiveModeActive.set(true);
+    midiConnectionState.set('Connected');
+    console.log(`Connected to MIDI device: ${deviceName}`);
+    return { success: true, deviceName };
+  } catch (error) {
+    console.error('Failed to start MIDI listening:', error);
+    midiConnectionState.set('Error');
+    return { success: false, error: error.toString() };
+  }
+}
+
+// Stop listening to MIDI device
+export async function stopMidiListening() {
+  try {
+    await invoke('stop_midi_listening');
+    isLiveModeActive.set(false);
+    selectedMidiDevice.set(null);
+    lastLiveNote.set(null);
+    // Refresh devices to update state
+    await refreshMidiDevices();
+    console.log('Stopped MIDI listening');
+    return { success: true };
+  } catch (error) {
+    console.error('Failed to stop MIDI listening:', error);
+    return { success: false, error: error.toString() };
+  }
+}
+
+// Set live transpose value
+export async function setLiveTranspose(value) {
+  const clamped = Math.max(-12, Math.min(12, value));
+  liveTranspose.set(clamped);
+  try {
+    await invoke('set_live_transpose', { value: clamped });
+    console.log(`Live transpose set to: ${clamped}`);
+  } catch (error) {
+    console.error('Failed to set live transpose:', error);
+  }
+}
+
+// Track if listeners are already initialized
+let liveMidiListenersInitialized = false;
+
+// Initialize live MIDI event listeners (only once)
+export function initializeLiveMidiListeners() {
+  if (liveMidiListenersInitialized) return;
+  liveMidiListenersInitialized = true;
+
+  // Listen for live note events
+  listen('live-note-event', (event) => {
+    const { midi_note, key, note_name, velocity } = event.payload;
+    lastLiveNote.set({
+      midiNote: midi_note,
+      key,
+      noteName: note_name,
+      velocity
+    });
+    // Clear after a short delay for visual feedback
+    setTimeout(() => {
+      lastLiveNote.update(current => {
+        // Only clear if it's the same note (avoid clearing newer notes)
+        if (current && current.midiNote === midi_note) {
+          return null;
+        }
+        return current;
+      });
+    }, 200);
+  });
+
+  // Listen for device disconnection
+  listen('midi-device-disconnected', () => {
+    isLiveModeActive.set(false);
+    selectedMidiDevice.set(null);
+    midiConnectionState.set('Disconnected');
+    console.log('MIDI device disconnected');
+  });
+
+  // Listen for device connection
+  listen('midi-device-connected', (event) => {
+    midiConnectionState.set('Connected');
+    console.log(`MIDI device connected: ${event.payload}`);
+  });
 }
