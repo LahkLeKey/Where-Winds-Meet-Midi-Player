@@ -1,6 +1,6 @@
 import { register, init, locale, waitLocale } from 'svelte-i18n';
 import { writable, derived } from 'svelte/store';
-import { invoke } from '@tauri-apps/api/core';
+import { invoke } from '../tauri/core-proxy.js';
 
 // Storage key for persistence
 const STORAGE_KEY = 'wwm-language';
@@ -177,5 +177,6 @@ init({
   initialLocale: getInitialLocale(),
 });
 
+export { deepMerge, hasNewKeys, loadLocaleWithUserOverrides };
 // Export for convenience
 export { t, locale, waitLocale } from 'svelte-i18n';
